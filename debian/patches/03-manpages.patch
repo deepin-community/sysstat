@@ -1,0 +1,47 @@
+From: Robert Luberda <robert@debian.org>
+Date: Tue, 23 Mar 2010 22:04:47 +0100
+Subject: Debian note in man pages
+
+Added README.Debian file and the 'Debian note' to sa1 and sa2 man pages
+to explain source of common problems (closes: #279049, #269712).
+
+Forwarded: not-needed
+---
+ man/sa1.in | 6 ++++++
+ man/sa2.in | 6 +++++-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/man/sa1.in b/man/sa1.in
+index 7ce07a3..0cdc500 100644
+--- a/man/sa1.in
++++ b/man/sa1.in
+@@ -71,6 +71,12 @@ place the following entry in your root crontab file:
+ 
+ .B 0 0 * * * @SA_LIB_DIR@/sa1 --rotate
+ 
++.SS Debian note
++The Debian sysstat package has already placed such an entry in your system crontab.
++Please refer to the
++.I /usr/share/doc/sysstat/README.Debian
++file for details.
++
+ .SH FILES
+ .I @SA_DIR@/saDD
+ .br
+diff --git a/man/sa2.in b/man/sa2.in
+index c4947ca..ea05625 100644
+--- a/man/sa2.in
++++ b/man/sa2.in
+@@ -36,7 +36,11 @@ This will generate by default a daily report called
+ .I @SA_DIR@
+ directory, where the
+ .IR "DD " "parameter is a number representing the day of the month."
+-
++.SS Debian note
++The Debian sysstat package has already placed such an entry in your system crontab.
++Please refer to the
++.I /usr/share/doc/sysstat/README.Debian
++file for details.
+ .SH FILES
+ .I @SA_DIR@/sarDD
+ .br

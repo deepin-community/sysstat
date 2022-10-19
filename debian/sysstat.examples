@@ -1,0 +1,5 @@
+contrib/irqstat/*irqstat*
+contrib/irqstat/README.md
+contrib/irqtop/*irqtop*
+contrib/sargraph/*sargraph*
+cron/crontab
