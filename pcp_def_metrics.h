@@ -1,6 +1,6 @@
 /*
  * pcp_def_metrics.h: Include file used to define PCP metrics.
- * (C) 2019-2020 by Sebastien Godard (sysstat <at> orange.fr)
+ * (C) 2019-2023 by Sebastien Godard (sysstat <at> orange.fr)
  */
 
 #ifndef _PCP_DEF_METRICS_H
@@ -44,24 +44,10 @@ void pcp_def_huge_metrics(void);
 void pcp_def_pwr_fan_metrics(struct activity *);
 void pcp_def_pwr_temp_metrics(struct activity *);
 void pcp_def_pwr_in_metrics(struct activity *);
+void pcp_def_pwr_bat_metrics(struct activity *);
 void pcp_def_pwr_usb_metrics(struct activity *);
 void pcp_def_filesystem_metrics(struct activity *);
 void pcp_def_fchost_metrics(struct activity *);
 void pcp_def_psi_metrics(struct activity *);
-
-/* Define domains number */
-#define PM_INDOM_CPU		0
-#define PM_INDOM_QUEUE		1
-#define PM_INDOM_NET_DEV	2
-#define PM_INDOM_SERIAL		3
-#define PM_INDOM_INT		4
-#define PM_INDOM_FILESYSTEM	5
-#define PM_INDOM_FCHOST		6
-#define PM_INDOM_USB		7
-#define PM_INDOM_DISK		8
-#define PM_INDOM_FAN		9
-#define PM_INDOM_TEMP		10
-#define PM_INDOM_IN		11
-#define PM_INDOM_PSI		12
 
 #endif /* _PCP_DEF_METRICS_H */

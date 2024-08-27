@@ -1,5 +1,5 @@
 # Makefile to build sysstat commands
-# (C) 1999-2020 Sebastien GODARD (sysstat <at> orange.fr)
+# (C) 1999-2023 Sebastien GODARD (sysstat <at> orange.fr)
 
 # Version and package name
 VERSION = @PACKAGE_VERSION@
@@ -97,7 +97,7 @@ endif
 ifndef CFLAGS
 CFLAGS = @CFLAGS@
 endif
-CFLAGS += -Wall -Wstrict-prototypes -pipe -O2
+CFLAGS += -Wall -Wstrict-prototypes -pipe -O2 -fno-tree-slp-vectorize
 
 ifndef DFLAGS
 DFLAGS = @DFLAGS@
@@ -110,7 +110,7 @@ DFLAGS += $(TFLAGS)
 endif
 
 ifndef LFLAGS
-LFLAGS = @STRIP@
+LFLAGS = @STRIP@ @LDFLAGS@
 endif
 
 # Commands
@@ -158,6 +158,19 @@ REQUIRE_NLS = -DUSE_NLS -DPACKAGE=\"$(PACKAGE)\" -DLOCALEDIR=\"$(NLS_DIR)\"
 endif
 ifdef REQUIRE_NLS
 	DFLAGS += $(REQUIRE_NLS)
+endif
+
+ifndef LTO
+LTO = @LTO@
+endif
+ifndef GCC_AR
+GCC_AR = @GCC_AR@
+endif
+ifeq ($(LTO),y)
+AR = $(GCC_AR)
+CFLAGS += -flto=auto
+LD = gcc
+LDFLAGS += $(CFLAGS)
 endif
 
 ifndef INSTALL_CRON
@@ -256,7 +269,7 @@ ioconf.o: ioconf.c ioconf.h common.h sysconfig.h
 act_sadc.o: activity.c sa.h common.h rd_stats.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SADC $(DFLAGS) $<
 
-act_sar.o: activity.c sa.h common.h rd_stats.h rd_sensors.h pr_stats.h
+act_sar.o: activity.c sa.h common.h rd_stats.h rd_sensors.h pr_stats.h pr_xstats.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SAR $(DFLAGS) $<
 
 act_sadf.o: activity.c sa.h common.h rd_stats.h rd_sensors.h rndr_stats.h xml_stats.h json_stats.h svg_stats.h raw_stats.h pcp_stats.h
@@ -276,19 +289,21 @@ count_light.o: count.c common.h rd_stats.h
 
 rd_sensors.o: rd_sensors.c common.h rd_sensors.h rd_stats.h
 
-pr_stats.o: pr_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h pr_stats.h
+pr_stats.o: pr_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h pr_xstats.h
+
+pr_xstats.o: pr_xstats.c sa.h common.h rd_stats.h rd_sensors.h
 
 rndr_stats.o: rndr_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h rndr_stats.h
 
-xml_stats.o: xml_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h xml_stats.h
+xml_stats.o: xml_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h
 
-json_stats.o: json_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h json_stats.h
+json_stats.o: json_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h
 
-svg_stats.o: svg_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h svg_stats.h
+svg_stats.o: svg_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h
 
-raw_stats.o: raw_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h raw_stats.h
+raw_stats.o: raw_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h
 
-pcp_stats.o: pcp_stats.c sa.h pcp_stats.h
+pcp_stats.o: pcp_stats.c common.h rd_stats.h rd_sensors.h sa.h
 
 sa_wrap.o: sa_wrap.c sa.h common.h rd_stats.h count.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SADC $(DFLAGS) $<
@@ -299,7 +314,7 @@ format_sadf.o: format.c sadf.h sa.h common.h rd_stats.h rd_sensors.h
 format_sar.o: format.c sa.h common.h rd_stats.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SAR $(DFLAGS) $<
 
-pcp_def_metrics.o: pcp_def_metrics.c
+pcp_def_metrics.o: pcp_def_metrics.c common.h sa.h rd_stats.h rd_sensors.h
 
 sadf_misc.o: sadf_misc.c sadf.h pcp_def_metrics.h sa.h common.h rd_stats.h rd_sensors.h
 
@@ -325,11 +340,11 @@ sadc.o: sadc.c sa.h version.h common.h rd_stats.h rd_sensors.h
 
 sadc: LFLAGS += $(LFSENSORS)
 
-sadc: sadc.o act_sadc.o sa_wrap.o sa_common_light.o common_light.o systest.o librdstats.a librdsensors.a
+sadc: sadc.o act_sadc.o sa_wrap.o sa_common_light.o common_light.o systest.o librdstats.a librdsensors.a libsyscom.a
 
 sar.o: sar.c sa.h version.h common.h rd_stats.h rd_sensors.h
 
-sar: sar.o act_sar.o format_sar.o sa_common.o pr_stats.o librdstats_light.a libsyscom.a
+sar: sar.o act_sar.o format_sar.o sa_common.o pr_stats.o pr_xstats.o librdstats_light.a libsyscom.a
 
 sadf.o: sadf.c sadf.h version.h sa.h common.h rd_stats.h rd_sensors.h
 
@@ -395,7 +410,7 @@ tests/32bits/sar32.o: sar.c sa.h version.h common.h rd_stats.h rd_sensors.h
 tests/32bits/act_sadc32.o: activity.c sa.h common.h rd_stats.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SADC $(DFLAGS) $<
 
-tests/32bits/act_sar32.o: activity.c sa.h common.h rd_stats.h rd_sensors.h pr_stats.h
+tests/32bits/act_sar32.o: activity.c sa.h common.h rd_stats.h rd_sensors.h pr_stats.h pr_xstats.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SAR $(DFLAGS) $<
 
 tests/32bits/sa_wrap32.o: sa_wrap.c sa.h common.h rd_stats.h count.h rd_sensors.h
@@ -440,7 +455,10 @@ tests/32bits/count_light32.o: count.c common.h rd_stats.h
 tests/32bits/format_sar32.o: format.c sa.h common.h rd_stats.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) -DSOURCE_SAR $(DFLAGS) $<
 
-tests/32bits/pr_stats32.o: pr_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h pr_stats.h
+tests/32bits/pr_stats32.o: pr_stats.c sa.h common.h rd_stats.h rd_sensors.h ioconf.h sysconfig.h pr_stats.h pr_xstats.h
+	$(CC) -o $@ -c $(CFLAGS) $(DFLAGS) $<
+
+tests/32bits/pr_xstats32.o: pr_xstats.c sa.h common.h rd_stats.h rd_sensors.h
 	$(CC) -o $@ -c $(CFLAGS) $(DFLAGS) $<
 
 tests/32bits/common32.o: common.c version.h common.h
@@ -456,7 +474,7 @@ tests/32bits/sadc32: LFLAGS += $(LFSENSORS32)
 
 tests/32bits/sadc32: tests/32bits/sadc32.o tests/32bits/act_sadc32.o tests/32bits/sa_wrap32.o tests/32bits/sa_common_light32.o tests/32bits/common_light32.o tests/32bits/systest32.o tests/32bits/librdstats32.a tests/32bits/librdsensors32.a
 
-tests/32bits/sar32: tests/32bits/sar32.o tests/32bits/act_sar32.o tests/32bits/format_sar32.o tests/32bits/sa_common32.o tests/32bits/pr_stats32.o tests/32bits/librdstats_light32.a tests/32bits/libsyscom32.a
+tests/32bits/sar32: tests/32bits/sar32.o tests/32bits/act_sar32.o tests/32bits/format_sar32.o tests/32bits/sa_common32.o tests/32bits/pr_stats32.o tests/32bits/pr_xstats32.o tests/32bits/librdstats_light32.a tests/32bits/libsyscom32.a
 
 ifdef REQUIRE_NLS
 locales: $(NLSGMO)
@@ -468,8 +486,8 @@ nls/sysstat.pot: $(wildcard *.c)
 	$(XGETTEXT) -o $@ -k_ --msgid-bugs-address="sysstat <at> orange.fr" $^
 
 # Phony targets
-.PHONY: clean distclean install install_base install_all uninstall \
-	uninstall_base uninstall_all dist bdist xdist gitdist squeeze simtest
+.PHONY: clean distclean install install_base install_all uninstall copyyear \
+	uninstall_base uninstall_all dist bdist xdist gitdist squeeze simtest extratest
 
 install_man: man/sadc.8 man/sar.1 man/sadf.1 man/sa1.8 man/sa2.8 man/sysstat.5
 ifeq ($(INSTALL_DOC),y)
@@ -521,6 +539,16 @@ squeeze:
 		mv squeeze.tmp $$c; \
 	done
 
+# Update Makefile.in by hand - Restore mode for iconfig.
+copyyear:
+	catalogs="$(SOURCE_CODE) iconfig do_test README.md sa1.in sa2.in sysconfig.in sysstat.in version.in"; \
+	for c in $$catalogs; do \
+		echo "Updating file: $$c"; \
+		sed 's/-2022/-2023/g' $$c > copyyear.tmp; \
+		mv copyyear.tmp $$c; \
+	done
+	chmod 755 iconfig do_test
+
 install_nls: locales
 ifdef REQUIRE_NLS
 	catalogs='$(NLSGMO)'; \
@@ -537,8 +565,8 @@ install_base: all sa1 sa2 sysstat.sysconfig install_man install_nls
 	mkdir -p $(DESTDIR)$(SA_LIB_DIR)
 	mkdir -p $(DESTDIR)$(SA_DIR)
 ifeq ($(CLEAN_SA_DIR),y)
-	find $(DESTDIR)$(SA_DIR) -type f | egrep "/sar?[0-9]{2,8}(\.(Z|gz|bz2|xz|lz|lzo))?$$" | xargs rm -f
-	find $(DESTDIR)$(SA_DIR) -type f | egrep "/sar?[0-9]{2,8}$$" | xargs rm -f
+	find $(DESTDIR)$(SA_DIR) -type f | grep -E "/sar?[0-9]{2,8}(\.(Z|gz|bz2|xz|lz|lzo))?$$" | xargs rm -f
+	find $(DESTDIR)$(SA_DIR) -type f | grep -E "/sar?[0-9]{2,8}$$" | xargs rm -f
 endif
 	mkdir -p $(DESTDIR)$(BIN_DIR)
 	mkdir -p $(DESTDIR)$(DOC_DIR)
@@ -561,12 +589,12 @@ ifeq ($(INSTALL_DOC),y)
 	$(INSTALL_DATA) CREDITS $(DESTDIR)$(DOC_DIR)
 	$(INSTALL_DATA) README.md $(DESTDIR)$(DOC_DIR)
 	$(INSTALL_DATA) FAQ.md $(DESTDIR)$(DOC_DIR)
-	$(INSTALL_DATA) *.lsm $(DESTDIR)$(DOC_DIR)
 endif
 
 ifdef SYSTEMD_UNIT_DIR
 install_all: install_base cron/sysstat-collect.service cron/sysstat-collect.timer \
-	cron/sysstat.sleep cron/sysstat-summary.service cron/sysstat-summary.timer
+	cron/sysstat.sleep cron/sysstat-summary.service cron/sysstat-summary.timer \
+	cron/sysstat-rotate.service cron/sysstat-rotate.timer
 else
 install_all: install_base cron/crontab sysstat \
 	cron/sysstat.crond cron/sysstat.cron.daily cron/sysstat.cron.hourly
@@ -618,6 +646,8 @@ endif
 		$(INSTALL_DATA) cron/sysstat-collect.timer $(DESTDIR)$(SYSTEMD_UNIT_DIR); \
 		$(INSTALL_DATA) cron/sysstat-summary.service $(DESTDIR)$(SYSTEMD_UNIT_DIR); \
 		$(INSTALL_DATA) cron/sysstat-summary.timer $(DESTDIR)$(SYSTEMD_UNIT_DIR); \
+		$(INSTALL_DATA) cron/sysstat-rotate.service $(DESTDIR)$(SYSTEMD_UNIT_DIR); \
+		$(INSTALL_DATA) cron/sysstat-rotate.timer $(DESTDIR)$(SYSTEMD_UNIT_DIR); \
 	elif [ -d $(DESTDIR)$(INIT_DIR) ]; then \
 		$(INSTALL_BIN) sysstat $(DESTDIR)$(INIT_DIR)/sysstat; \
 		if [ "$(COPY_ONLY)" = "n" ]; then \
@@ -748,6 +778,8 @@ endif
 		rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/sysstat-collect.timer; \
 		rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/sysstat-summary.service; \
 		rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/sysstat-summary.timer; \
+		rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/sysstat-rotate.service; \
+		rm -f $(DESTDIR)$(SYSTEMD_UNIT_DIR)/sysstat-rotate.timer; \
 	fi
 	if [ -n "$(SYSTEMD_UNIT_DIR)" -a -n "$(SYSTEMD_SLEEP_DIR)" -a -d "$(DESTDIR)$(SYSTEMD_SLEEP_DIR)" ]; then \
 		rm -f $(DESTDIR)$(SYSTEMD_SLEEP_DIR)/sysstat.sleep; \
@@ -773,7 +805,9 @@ endif
 
 TESTDIR="tests"
 TESTRUN="/bin/sh"
-TESTLIST:=$(shell ls $(TESTDIR) | egrep '^[0-9]+$$' | sort -n)
+TESTLIST:=$(shell ls $(TESTDIR) | grep -E '^[0-9]+$$' | sort -n)
+EXTRADIR="tests/extra"
+EXTRALIST:=$(shell ls $(EXTRADIR) | grep -E '^[0-9]+$$' | sort -n)
 
 testcomp: tests/ini/inisar sa32bit
 
@@ -791,21 +825,36 @@ unit:
 	@echo $(X) 2>&1
 	@cat $(TESTDIR)/$(X) | $(TESTRUN)
 
-# Use "do_test" script to make the following target
+extraunit:
+	@echo $(X) 2>&1
+	@cat $(EXTRADIR)/$(X) | $(TESTRUN)
+
+# Use "do_test" script to make the following targets
+simtest: DFLAGS += -DTEST
+
 simtest: all testcomp
-	@$(foreach x, $(TESTLIST), $(MAKE) X=$x unit || exit;)
+#	@$(foreach x, $(TESTLIST), $(MAKE) X=$x unit || exit;)
+#	rm -f tests/root
+#	ln -s root1 tests/root
+#	@echo Simulation tests: Success!
+
+extratest: DFLAGS += -DTEST
+
+extratest: all
+	@$(foreach x, $(EXTRALIST), $(MAKE) X=$x extraunit || exit;)
 	rm -f tests/root
 	ln -s root1 tests/root
-	@echo Simulation tests: Success!
+	@echo Extra simulation tests: Success!
 
 clean:
-	rm -f sadc sar sadf iostat tapestat mpstat pidstat cifsiostat *.o *.a core TAGS tests/*.tmp
+	rm -f sadc sar sadf iostat tapestat mpstat pidstat cifsiostat *.o *.a core TAGS tests/*.tmp tests/extra/*.tmp
+	rm -f tests/LAST tests/SKIPPED
 	rm -f nfsiostat* man/nfsiostat*
-	rm -f tests/sa[012]*
+	rm -f tests/sa[0123]*
 	rm -f tests/root
 	ln -s root1 tests/root
 	rm -f tests/ini/inisar tests/32bits/sadc32 tests/32bits/sar32
-	rm -f tests/ini/*.o tests/ini/*.a tests/ini/core tests/pcpar.*
+	rm -f tests/ini/*.o tests/ini/*.a tests/ini/core tests/pcpar.* tests/extra/pcpar-ssr.*
 	rm -f tests/32bits/*.o tests/32bits/*.a tests/32bits/core
 	find nls -name "*.gmo" -exec rm -f {} \;
 
@@ -813,6 +862,7 @@ almost-distclean: clean nls/sysstat.pot
 	rm -f sa1 sa2 sysstat cron/crontab version.h sysconfig.h
 	rm -f sysstat.sysconfig cron/sysstat.crond cron/sysstat.cron.daily sysstat.service
 	rm -f cron/sysstat-collect.service cron/sysstat-collect.timer
+	rm -f cron/sysstat-rotate.service cron/sysstat-rotate.timer
 	rm -f cron/sysstat-summary.service cron/sysstat-summary.timer cron/sysstat.sleep
 	rm -f cron/sysstat.cron.hourly cron/sysstat.crond.sample cron/sysstat.crond.sample.in
 	rm -f man/sa1.8 man/sa2.8 man/sadc.8 man/sadf.1 man/sar.1 man/iostat.1 man/sysstat.5

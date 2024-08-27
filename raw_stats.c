@@ -1,6 +1,6 @@
 /*
  * raw_stats.c: Functions used by sar to display statistics in raw format.
- * (C) 1999-2020 by Sebastien GODARD (sysstat <at> orange.fr)
+ * (C) 1999-2023 by Sebastien GODARD (sysstat <at> orange.fr)
  *
  ***************************************************************************
  * This program is free software; you can redistribute it and/or modify it *
@@ -26,9 +26,9 @@
 
 #include "sa.h"
 #include "ioconf.h"
-#include "raw_stats.h"
 
-extern unsigned int flags;
+extern uint64_t flags;
+extern char bat_status[][16];
 
 /*
  ***************************************************************************
@@ -39,6 +39,8 @@ extern unsigned int flags;
  *		metric names. In each subsequent call, must be NULL.
  * @pos		Index in @hdr_line string, 0 being the first one (headers
  * 		are delimited by the '|' character).
+ *		If @hdr_line is NULL then @pos is the item number for fields
+ *		containing a '*' character (e.g. "CPU*").
  *
  * RETURNS:
  * Pointer on string containing field name.
@@ -46,13 +48,15 @@ extern unsigned int flags;
  */
 char *pfield(char *hdr_line, int pos)
 {
-	char hline[HEADER_LINE_LEN] = "";
 	static char field[HEADER_LINE_LEN] = "";
+	static char gen_name[HEADER_LINE_LEN] = "";
 	static int idx = 0;
-	char *hl;
 	int i, j = 0;
 
 	if (hdr_line) {
+		char hline[HEADER_LINE_LEN] = "";
+		char *hl;
+
 		strncpy(hline, hdr_line, sizeof(hline) - 1);
 		hline[sizeof(hline) - 1] = '\0';
 		idx = 0;
@@ -71,11 +75,26 @@ char *pfield(char *hdr_line, int pos)
 		field[sizeof(field) - 1] = '\0';
 	}
 
-	/* Display current field */
 	if (strchr(field + idx, ';')) {
 		j = strcspn(field + idx, ";");
 		*(field + idx + j) = '\0';
 	}
+	else if (strchr(field + idx, '*') || (!hdr_line && pos)) {
+		j = strcspn(field + idx, "*");
+		if (j < strlen(field + idx)) {
+			*(field + idx + j) = '\0';
+		}
+		if (!pos) {
+			strcpy(gen_name, K_LOWERALL);
+		}
+		else {
+			snprintf(gen_name, sizeof(gen_name), "%s%d", field + idx, pos - 1);
+			gen_name[sizeof(gen_name) - 1] = '\0';
+		}
+
+		return gen_name;
+	}
+
 	i = idx;
 	idx += j + 1;
 
@@ -96,7 +115,7 @@ void pval(unsigned long long valp, unsigned long long valc)
 	if (DISPLAY_DEBUG_MODE(flags)) {
 		if (valc < valp) {
 			/* Field's value has decreased */
-			printf(" [DEC]");
+			cprintf_s(IS_DEBUG, "%s", " [DEC]");
 		}
 	}
 	printf("; %llu; %llu;", valp, valc);
@@ -150,12 +169,12 @@ __print_funct_t raw_print_cpu_stats(struct activity *a, char *timestr, int curr)
 			     scc->cpu_iowait + scc->cpu_idle + scc->cpu_steal +
 			     scc->cpu_hardirq + scc->cpu_softirq) == 0) {
 				/* CPU is offline */
-				printf(" [OFF]");
+				cprintf_s(IS_DEBUG, "%s", " [OFF]");
 			}
 			else {
 				if (!get_per_cpu_interval(scc, scp)) {
 					/* CPU is tickless */
-					printf(" [TLS]");
+					cprintf_s(IS_DEBUG, "%s", " [TLS]");
 				}
 			}
 		}
@@ -237,24 +256,46 @@ __print_funct_t raw_print_pcsw_stats(struct activity *a, char *timestr, int curr
  */
 __print_funct_t raw_print_irq_stats(struct activity *a, char *timestr, int curr)
 {
-	int i;
-	struct stats_irq *sic, *sip;
+	int i, c;
+	struct stats_irq *stc_cpu_irq, *stp_cpu_irq, *stc_cpuall_irq;
 
-	for (i = 0; (i < a->nr[curr]) && (i < a->bitmap->b_size + 1); i++) {
+	/* @nr[curr] cannot normally be greater than @nr_ini */
+	if (a->nr[curr] > a->nr_ini) {
+		a->nr_ini = a->nr[curr];
+	}
 
-		sic = (struct stats_irq *) ((char *) a->buf[curr]  + i * a->msize);
-		sip = (struct stats_irq *) ((char *) a->buf[!curr] + i * a->msize);
+	for (i = 0; i < a->nr2; i++) {
 
-		/* Should current interrupt (including int "sum") be displayed? */
-		if (a->bitmap->b_array[i >> 3] & (1 << (i & 0x07))) {
+		stc_cpuall_irq = (struct stats_irq *) ((char *) a->buf[curr] + i * a->msize);
 
-			/* Yes: Display it */
-			printf("%s; %s; %d;", timestr,
-			       pfield(a->hdr_line, FIRST), i - 1);
-			printf(" %s", pfield(NULL, 0));
-			pval(sip->irq_nr, sic->irq_nr);
-			printf("\n");
+		if (a->item_list != NULL) {
+			/* A list of devices has been entered on the command line */
+			if (!search_list_item(a->item_list, stc_cpuall_irq->irq_name))
+				/* Device not found */
+				continue;
 		}
+
+		printf("%s; %s; %s;", timestr,
+		       pfield(a->hdr_line, FIRST), stc_cpuall_irq->irq_name);
+
+		/* In raw mode, offline CPU (in datafile) are always displayed */
+		for (c = 0; (c < a->nr[curr]) && (c < a->bitmap->b_size + 1); c++) {
+
+			stc_cpu_irq = (struct stats_irq *) ((char *) a->buf[curr] + c * a->msize * a->nr2
+										  + i * a->msize);
+			stp_cpu_irq = (struct stats_irq *) ((char *) a->buf[!curr] + c * a->msize * a->nr2
+										  + i * a->msize);
+
+			/* Should current interrupt (including int "sum") be displayed? */
+			if (!(a->bitmap->b_array[c >> 3] & (1 << (c & 0x07))))
+				/* No */
+				continue;
+
+			printf(" %s", pfield(NULL, c));
+			pval((unsigned long long) stp_cpu_irq->irq_nr,
+			     (unsigned long long) stc_cpu_irq->irq_nr);
+		}
+		printf("\n");
 	}
 }
 
@@ -313,6 +354,10 @@ __print_funct_t raw_print_paging_stats(struct activity *a, char *timestr, int cu
 	pval((unsigned long long) spp->pgscan_direct, (unsigned long long) spc->pgscan_direct);
 	printf(" %s", pfield(NULL, 0));
 	pval((unsigned long long) spp->pgsteal, (unsigned long long) spc->pgsteal);
+	printf(" %s", pfield(NULL, 0));
+	pval((unsigned long long) spp->pgpromote, (unsigned long long) spc->pgpromote);
+	printf(" %s", pfield(NULL, 0));
+	pval((unsigned long long) spp->pgdemote, (unsigned long long) spc->pgdemote);
 	printf("\n");
 }
 
@@ -350,6 +395,56 @@ __print_funct_t raw_print_io_stats(struct activity *a, char *timestr, int curr)
 }
 
 /*
+ * **************************************************************************
+ * Display RAM memory utilization in raw format.
+ *
+ * IN:
+ * @smc		Structure with statistics.
+ * @dispall	TRUE if all memory fields should be displayed.
+ ***************************************************************************
+ */
+void raw_print_ram_memory_stats(struct stats_memory *smc, int dispall)
+{
+	printf(" %s; %llu;", pfield(NULL, 0), smc->availablekb);
+	printf(" kbttlmem; %llu;", smc->tlmkb);
+	pfield(NULL, 0); /* Skip kbmemused */
+	pfield(NULL, 0); /* Skip %memused */
+	printf(" %s; %llu;", pfield(NULL, 0), smc->bufkb);
+	printf(" %s; %llu;", pfield(NULL, 0), smc->camkb);
+	printf(" %s; %llu;", pfield(NULL, 0), smc->comkb);
+	pfield(NULL, 0); /* Skip %commit */
+	printf(" %s; %llu;", pfield(NULL, 0), smc->activekb);
+	printf(" %s; %llu;", pfield(NULL, 0), smc->inactkb);
+	printf(" %s; %llu;", pfield(NULL, 0), smc->dirtykb);
+
+	if (dispall) {
+		printf(" %s; %llu;", pfield(NULL, 0), smc->anonpgkb);
+		printf(" %s; %llu;", pfield(NULL, 0), smc->slabkb);
+		printf(" %s; %llu;", pfield(NULL, 0), smc->kstackkb);
+		printf(" %s; %llu;", pfield(NULL, 0), smc->pgtblkb);
+		printf(" %s; %llu;", pfield(NULL, 0), smc->vmusedkb);
+	}
+	printf("\n");
+}
+
+/*
+ * **************************************************************************
+ * Display swap memory utilization in raw format.
+ *
+ * IN:
+ * @smc		Structure with statistics.
+ ***************************************************************************
+ */
+void raw_print_swap_memory_stats(struct stats_memory *smc)
+{
+	printf(" kbttlswp; %llu;", smc->tlskb);
+	pfield(NULL, 0); /* Skip kbswpused */
+	pfield(NULL, 0); /* Skip %swpused */
+	printf(" %s; %llu;", pfield(NULL, 0), smc->caskb);
+	printf("\n");
+}
+
+/*
  ***************************************************************************
  * Display memory statistics in raw format.
  *
@@ -366,35 +461,12 @@ __print_funct_t raw_print_memory_stats(struct activity *a, char *timestr, int cu
 
 	if (DISPLAY_MEMORY(a->opt_flags)) {
 		printf("%s; %s; %llu;", timestr, pfield(a->hdr_line, FIRST), smc->frmkb);
-		printf(" %s; %llu;", pfield(NULL, 0), smc->availablekb);
-		printf(" kbttlmem; %llu;", smc->tlmkb);
-		pfield(NULL, 0); /* Skip kbmemused */
-		pfield(NULL, 0); /* Skip %memused */
-		printf(" %s; %llu;", pfield(NULL, 0), smc->bufkb);
-		printf(" %s; %llu;", pfield(NULL, 0), smc->camkb);
-		printf(" %s; %llu;", pfield(NULL, 0), smc->comkb);
-		pfield(NULL, 0); /* Skip %commit */
-		printf(" %s; %llu;", pfield(NULL, 0), smc->activekb);
-		printf(" %s; %llu;", pfield(NULL, 0), smc->inactkb);
-		printf(" %s; %llu;", pfield(NULL, 0), smc->dirtykb);
-
-		if (DISPLAY_MEM_ALL(a->opt_flags)) {
-			printf(" %s; %llu;", pfield(NULL, 0), smc->anonpgkb);
-			printf(" %s; %llu;", pfield(NULL, 0), smc->slabkb);
-			printf(" %s; %llu;", pfield(NULL, 0), smc->kstackkb);
-			printf(" %s; %llu;", pfield(NULL, 0), smc->pgtblkb);
-			printf(" %s; %llu;", pfield(NULL, 0), smc->vmusedkb);
-		}
-		printf("\n");
+		raw_print_ram_memory_stats(smc, DISPLAY_MEM_ALL(a->opt_flags));
 	}
 
 	if (DISPLAY_SWAP(a->opt_flags)) {
 		printf("%s; %s; %llu;", timestr, pfield(a->hdr_line, SECOND), smc->frskb);
-		printf(" kbttlswp; %llu;", smc->tlskb);
-		pfield(NULL, 0); /* Skip kbswpused */
-		pfield(NULL, 0); /* Skip %swpused */
-		printf(" %s; %llu;", pfield(NULL, 0), smc->caskb);
-		printf("\n");
+		raw_print_swap_memory_stats(smc);
 	}
 }
 
@@ -490,7 +562,7 @@ __print_funct_t raw_print_serial_stats(struct activity *a, char *timestr, int cu
 
 		printf("%s; %s", timestr, pfield(a->hdr_line, FIRST));
 		if (!found && DISPLAY_DEBUG_MODE(flags)) {
-			printf(" [NEW]");
+			cprintf_s(IS_DEBUG, "%s", " [NEW]");
 		}
 		printf("; %u;", ssc->line);
 		if (!found) {
@@ -556,7 +628,7 @@ __print_funct_t raw_print_disk_stats(struct activity *a, char *timestr, int curr
 			/* This is a newly registered interface. Previous stats are zero */
 			sdp = &sdpzero;
 			if (DISPLAY_DEBUG_MODE(flags)) {
-				printf(" [%s]", j == -1 ? "NEW" : "BCK");
+				cprintf_s(IS_DEBUG, "%s",  j == -1 ? " [NEW]" : " [BCK]");
 			}
 		}
 		else {
@@ -621,7 +693,7 @@ __print_funct_t raw_print_net_dev_stats(struct activity *a, char *timestr, int c
 			/* This is a newly registered interface. Previous stats are zero */
 			sndp = &sndzero;
 			if (DISPLAY_DEBUG_MODE(flags)) {
-				printf(" [%s]", j == -1 ? "NEW" : "BCK");
+				cprintf_s(IS_DEBUG, "%s",  j == -1 ? " [NEW]" : " [BCK]");
 			}
 		}
 		else {
@@ -643,7 +715,7 @@ __print_funct_t raw_print_net_dev_stats(struct activity *a, char *timestr, int c
 		pval(sndp->tx_compressed, sndc->tx_compressed);
 		printf(" %s", pfield(NULL, 0));
 		pval(sndp->multicast, sndc->multicast);
-		printf(" speed; %u; duplex; %u;\n", sndc->speed, sndc->duplex);
+		printf(" speed; %u; duplex; %u;\n", sndc->speed, (unsigned int) sndc->duplex);
 	}
 }
 
@@ -681,7 +753,7 @@ __print_funct_t raw_print_net_edev_stats(struct activity *a, char *timestr, int 
 			/* This is a newly registered interface. Previous stats are zero */
 			snedp = &snedzero;
 			if (DISPLAY_DEBUG_MODE(flags)) {
-				printf(" [%s]", j == -1 ? "NEW" : "BCK");
+				cprintf_s(IS_DEBUG, "%s",  j == -1 ? " [NEW]" : " [BCK]");
 			}
 		}
 		else {
@@ -1480,7 +1552,7 @@ __print_funct_t raw_print_pwr_usb_stats(struct activity *a, char *timestr, int c
 
 		printf("%s; %s; \"%s\";", timestr, pfield(a->hdr_line, FIRST), suc->manufacturer);
 		printf(" %s; \"%s\";", pfield(NULL, 0), suc->product);
-		printf(" %s; %d;", pfield(NULL, 0), suc->bus_nr);
+		printf(" %s; %u;", pfield(NULL, 0), suc->bus_nr);
 		printf(" %s; %x;", pfield(NULL, 0), suc->vendor_id);
 		printf(" %s; %x;", pfield(NULL, 0), suc->product_id);
 		printf(" %s; %u;\n", pfield(NULL, 0), suc->bmaxpower);
@@ -1582,7 +1654,7 @@ __print_funct_t raw_print_fchost_stats(struct activity *a, char *timestr, int cu
 			/* This is a newly registered host. Previous stats are zero */
 			sfcp = &sfczero;
 			if (DISPLAY_DEBUG_MODE(flags)) {
-				printf(" [NEW]");
+				cprintf_s(IS_DEBUG, "%s", " [NEW]");
 			}
 		}
 
@@ -1648,9 +1720,9 @@ __print_funct_t raw_print_softnet_stats(struct activity *a, char *timestr, int c
 		printf("%s; %s", timestr, pfield(a->hdr_line, FIRST));
 		if (DISPLAY_DEBUG_MODE(flags) && i) {
 			if (ssnc->processed + ssnc->dropped + ssnc->time_squeeze +
-			    ssnc->received_rps + ssnc->flow_limit == 0) {
+			    ssnc->received_rps + ssnc->flow_limit + ssnc->backlog_len == 0) {
 				/* CPU is considered offline */
-				printf(" [OFF]");
+				cprintf_s(IS_DEBUG, "%s", " [OFF]");
 			}
 		}
 		printf("; %d;", i - 1);
@@ -1665,6 +1737,7 @@ __print_funct_t raw_print_softnet_stats(struct activity *a, char *timestr, int c
 		pval((unsigned long long) ssnp->received_rps, (unsigned long long) ssnc->received_rps);
 		printf(" %s", pfield(NULL, 0));
 		pval((unsigned long long) ssnp->flow_limit, (unsigned long long) ssnc->flow_limit);
+		printf(" %s; %u;", pfield(NULL, 0), ssnc->backlog_len);
 		printf("\n");
 	}
 }
@@ -1751,4 +1824,42 @@ __print_funct_t raw_print_psimem_stats(struct activity *a, char *timestr, int cu
 	printf(" %s", pfield(NULL, 0));
 	pval((unsigned long long) psip->full_mem_total, (unsigned long long) psic->full_mem_total);
 	printf("\n");
+}
+
+/*
+ * **************************************************************************
+ * Display batteries statistics in raw format.
+ *
+ * IN:
+ * @a		Activity structure with statistics.
+ * @timestr	Time for current statistics sample.
+ * @curr	Index in array for current sample statistics.
+ ***************************************************************************
+ */
+__print_funct_t raw_print_pwr_bat_stats(struct activity *a, char *timestr, int curr)
+{
+	int i;
+	struct stats_pwr_bat *spbc, *spbp;
+
+	for (i = 0; i < a->nr[curr]; i++) {
+		spbc = (struct stats_pwr_bat *) ((char *) a->buf[curr] + i * a->msize);
+		spbp = (struct stats_pwr_bat *) ((char *) a->buf[!curr] + i * a->msize);
+
+		printf("%s; %s; %d;", timestr, pfield(a->hdr_line, FIRST), (int) spbc->bat_id);
+		printf(" %s; %u; %u;", pfield(NULL, 0),
+		       (unsigned int) spbp->capacity, (unsigned int) spbc->capacity);
+		printf(" status; %d", (int) spbc->status);
+
+		if (DISPLAY_DEBUG_MODE(flags)) {
+			if (spbc->status >= BAT_STS_NR) {
+				cprintf_s(IS_DEBUG, " [%s]", "UNDEFINED");
+			}
+			else {
+				cprintf_s(IS_COMMENT, " [%s]",
+					  bat_status[(unsigned int) spbc->status]);
+			}
+		}
+
+		printf(";\n");
+	}
 }

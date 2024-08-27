@@ -1,7 +1,7 @@
 /*
  * tapestat: report tape statistics
  * (C) 2015 Hewlett-Packard Development Company, L.P.
- * 
+ *
  * Initial revision by Shane M. SEYMOUR (shane.seymour <at> hpe.com)
  * Modified for sysstat by Sebastien GODARD (sysstat <at> orange.fr)
  */
@@ -28,8 +28,10 @@
 #define DISPLAY_ZERO_OMIT(m)		(((m) & T_D_ZERO_OMIT)       == T_D_ZERO_OMIT)
 #define DISPLAY_UNIT(m)			(((m) & T_D_UNIT)	     == T_D_UNIT)
 
-#define TAPE_STATS_VALID 1
-#define TAPE_STATS_INVALID 0
+enum {
+	TAPE_STATS_INVALID = 0,
+	TAPE_STATS_VALID   = 1
+};
 
 #define SYSFS_CLASS_TAPE_DIR 	PRE "/sys/class/scsi_tape"
 #define TAPE_STAT_PATH		PRE "/sys/class/scsi_tape/st%i/stats/"
