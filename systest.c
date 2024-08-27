@@ -1,6 +1,6 @@
 /*
  * sysstat test functions.
- * (C) 2019-2020 by Sebastien GODARD (sysstat <at> orange.fr)
+ * (C) 2019-2023 by Sebastien GODARD (sysstat <at> orange.fr)
  *
  ***************************************************************************
  * This program is free software; you can redistribute it and/or modify it *
@@ -37,7 +37,7 @@
 
 #include "systest.h"
 
-time_t __unix_time = 0;
+time_t __unix_time = 1591016000;	/* Mon Jun  1 12:53:20 2020 UTC */
 int __env = 0;
 
 extern long interval;
@@ -104,11 +104,11 @@ int get_fs_stat(char *c, struct statvfs *buf)
 	 * So don't use values greater then UINT_MAX to make sure that values
 	 * won't overflow on 32-bit systems.
 	 */
-	unsigned long long bfree[4]  = {739427840, 286670336, 1696156672, 2616732672};
-	unsigned long long blocks[4] = {891291136, 502345216, 1829043712, 3502345216};
-	unsigned long long bavail[4] = {722675712, 241253120, 1106515456, 1871315456};
-	unsigned long long files[4]  = {6111232, 19202048, 1921360, 19202048};
-	unsigned long long ffree[4]  = {6008414, 19201593, 1621550, 19051710};
+	const unsigned long long bfree[4]  = {739427840, 286670336, 1696156672, 2616732672};
+	const unsigned long long blocks[4] = {891291136, 502345216, 1829043712, 3502345216};
+	const unsigned long long bavail[4] = {722675712, 241253120, 1106515456, 1871315456};
+	const unsigned long long files[4]  = {6111232, 19202048, 1921360, 19202048};
+	const unsigned long long ffree[4]  = {6008414, 19201593, 1621550, 19051710};
 
 	buf->f_bfree = bfree[p];
 	buf->f_blocks = blocks[p];
@@ -149,8 +149,10 @@ void next_time_step(void)
 
 	__unix_time += interval;
 
+	/* Get root directory name (root1, root2, etc.) at which the "root" symlink points */
 	if ((resolved_name = realpath(ROOTDIR, NULL)) != NULL) {
 		if (strlen(resolved_name) > 4) {
+			/* Set root_nr to the root directory number (1, 2, etc.) */
 			root_nr = atoi(resolved_name + strlen(resolved_name) - 1);
 		}
 		free(resolved_name);
@@ -160,19 +162,22 @@ void next_time_step(void)
 		exit(1);
 	}
 
+	/* Set next root directory name (root2, root3, etc.). Directories like root1b are unreachable */
 	snprintf(rootf, sizeof(rootf), "%s%d", ROOTFILE, ++root_nr);
 	rootf[sizeof(rootf) - 1] = '\0';
 	snprintf(testf, sizeof(testf), "%s/%s", TESTDIR, rootf);
 	testf[sizeof(testf) - 1] = '\0';
 
+	/* Make sure that new root directory exists */
 	if (access(testf, F_OK) < 0) {
 		if (errno == ENOENT) {
-			/* No more kernel directories: Simulate a Ctrl/C */
+			/* No more root directories: Simulate a Ctrl/C */
 			int_handler(0);
-			return ;
+			return;
 		}
 	}
 
+	/* Create "root" symlink pointing at the new root directory */
 	if (symlink(rootf, ROOTDIR) < 0) {
 		perror("link");
 		exit(1);

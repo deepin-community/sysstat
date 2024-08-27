@@ -1,6 +1,6 @@
 /*
- * rndr_stats.c: Funtions used by sadf to display statistics in selected format.
- * (C) 1999-2020 by Sebastien GODARD (sysstat <at> orange.fr)
+ * rndr_stats.c: Functions used by sadf to display statistics in selected format.
+ * (C) 1999-2023 by Sebastien GODARD (sysstat <at> orange.fr)
  *
  ***************************************************************************
  * This program is free software; you can redistribute it and/or modify it *
@@ -37,7 +37,8 @@
 
 char *seps[] =  {"\t", ";"};
 
-extern unsigned int flags;
+extern uint64_t flags;
+extern char bat_status[][16];
 
 /*
  ***************************************************************************
@@ -145,7 +146,7 @@ static void render(int isdb, char *pre, int rflags, const char *pptxt,
 	else if (rflags & PT_USERND) {
 		printf("%s%.0f", seps[isdb], dval);
 	}
-	else {
+	else if (rflags & PT_NOFLAG) {
 		printf("%s%.2f", seps[isdb], dval);
 	}
 	if (newline) {
@@ -174,7 +175,7 @@ __print_funct_t render_cpu_stats(struct activity *a, int isdb, char *pre,
 	struct stats_cpu *scc, *scp;
 	unsigned char offline_cpu_bitmap[BITMAP_SIZE(NR_CPUS)] = {0};
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	/* @nr[curr] cannot normally be greater than @nr_ini */
 	if (a->nr[curr] > a->nr_ini) {
@@ -481,7 +482,7 @@ __print_funct_t render_pcsw_stats(struct activity *a, int isdb, char *pre,
 		*spc = (struct stats_pcsw *) a->buf[curr],
 		*spp = (struct stats_pcsw *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	/* The first one as an example */
 	render(isdb,		/* db/ppc flag */
@@ -517,35 +518,85 @@ __print_funct_t render_pcsw_stats(struct activity *a, int isdb, char *pre,
 __print_funct_t render_irq_stats(struct activity *a, int isdb, char *pre,
 				 int curr, unsigned long long itv)
 {
-	int i;
-	struct stats_irq *sic, *sip;
-	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+	int i, c, first;
+	struct stats_irq *stc_cpu_irq, *stp_cpu_irq, *stc_cpuall_irq;
+	unsigned char masked_cpu_bitmap[BITMAP_SIZE(NR_CPUS)] = {0};
+	char cpu_name[32], ppc_txt[512];
+	double dval;
 
-	for (i = 0; (i < a->nr[curr]) && (i < a->bitmap->b_size + 1); i++) {
+	/* @nr[curr] cannot normally be greater than @nr_ini */
+	if (a->nr[curr] > a->nr_ini) {
+		a->nr_ini = a->nr[curr];
+	}
 
-		sic = (struct stats_irq *) ((char *) a->buf[curr]  + i * a->msize);
-		sip = (struct stats_irq *) ((char *) a->buf[!curr] + i * a->msize);
+	/* Identify offline and unselected CPU, and keep persistent statistics values */
+	get_global_int_statistics(a, !curr, curr, flags, masked_cpu_bitmap);
 
-		/* Should current interrupt (including int "sum") be displayed? */
-		if (a->bitmap->b_array[i >> 3] & (1 << (i & 0x07))) {
+	for (i = 0; i < a->nr2; i++) {
+
+		stc_cpuall_irq = (struct stats_irq *) ((char *) a->buf[curr] + i * a->msize);
+
+		if (a->item_list != NULL) {
+			/* A list of devices has been entered on the command line */
+			if (!search_list_item(a->item_list, stc_cpuall_irq->irq_name))
+				/* Device not found */
+				continue;
+		}
+
+		first = TRUE;
+		for (c = 0; (c < a->nr[curr]) && (c < a->bitmap->b_size + 1); c++) {
+
+			stc_cpu_irq = (struct stats_irq *) ((char *) a->buf[curr] + c * a->msize * a->nr2
+										  + i * a->msize);
+			stp_cpu_irq = (struct stats_irq *) ((char *) a->buf[!curr] + c * a->msize * a->nr2
+										  + i * a->msize);
+
+			/* Should current CPU (including CPU "all") be displayed? */
+			if (masked_cpu_bitmap[c >> 3] & (1 << (c & 0x07)))
+				/* No */
+				continue;
+
+			/* Compute value to be displayed */
+			dval = S_VALUE(stp_cpu_irq->irq_nr, stc_cpu_irq->irq_nr, itv);
 
 			/* Yes: Display it */
-			if (!i) {
-				/* This is interrupt "sum" */
-				render(isdb, pre, pt_newlin,
-				       "sum\tintr/s", "-1", NULL,
-				       NOVAL,
-				       S_VALUE(sip->irq_nr, sic->irq_nr, itv),
-				       NULL);
+			if (!c) {
+				strcpy(cpu_name, "all");
+
+				/* If number of int has decreased for CPU "all" then display 0.00 */
+				if (stc_cpu_irq->irq_nr < stp_cpu_irq->irq_nr) {
+					dval = 0.0;
+				}
 			}
 			else {
-				render(isdb, pre, pt_newlin,
-				       "i%03d\tintr/s", "%d", cons(iv, i - 1, NOVAL),
+				snprintf(cpu_name, sizeof(cpu_name), "cpu%d", c - 1);
+				cpu_name[sizeof(cpu_name) - 1] = '\0';
+			}
+			snprintf(ppc_txt, sizeof(ppc_txt), "%s\t%s", stc_cpuall_irq->irq_name, cpu_name);
+			ppc_txt[sizeof(ppc_txt) - 1] = '\0';
+
+			if (first) {
+				render(isdb, pre, PT_NOFLAG,
+				       "%s", "%s",
+				       isdb ? cons(sv, stc_cpuall_irq->irq_name, NOVAL)
+				            : cons(sv, ppc_txt, NOVAL),
 				       NOVAL,
-				       S_VALUE(sip->irq_nr, sic->irq_nr, itv),
+				       dval,
+				       NULL);
+				first = FALSE;
+			}
+			else {
+				render(isdb, pre, PT_NOFLAG,
+				       "%s", NULL,
+				       cons(sv, ppc_txt, NOVAL),
+				       NOVAL,
+				       dval,
 				       NULL);
 			}
+		}
+		if (isdb && !DISPLAY_HORIZONTALLY(flags)) {
+			/* Print a newline chr and make sure that @pre text will be printed next time */
+			render(isdb, pre, PT_NEWLIN, NULL, NULL, NULL, NOVAL, NOVAL, NULL);
 		}
 	}
 }
@@ -569,7 +620,7 @@ __print_funct_t render_swap_stats(struct activity *a, int isdb, char *pre,
 		*ssc = (struct stats_swap *) a->buf[curr],
 		*ssp = (struct stats_swap *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tpswpin/s", NULL, NULL,
@@ -602,7 +653,7 @@ __print_funct_t render_paging_stats(struct activity *a, int isdb, char *pre,
 		*spc = (struct stats_paging *) a->buf[curr],
 		*spp = (struct stats_paging *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tpgpgin/s", NULL, NULL,
@@ -652,14 +703,16 @@ __print_funct_t render_paging_stats(struct activity *a, int isdb, char *pre,
 	       S_VALUE(spp->pgsteal, spc->pgsteal, itv),
 	       NULL);
 
-	render(isdb, pre, pt_newlin,
-	       "-\t%vmeff", NULL, NULL,
+	render(isdb, pre, PT_NOFLAG,
+	       "-\tpgprom/s", NULL, NULL,
 	       NOVAL,
-	       (spc->pgscan_kswapd + spc->pgscan_direct -
-		spp->pgscan_kswapd - spp->pgscan_direct) ?
-	       SP_VALUE(spp->pgsteal, spc->pgsteal,
-			spc->pgscan_kswapd + spc->pgscan_direct -
-			spp->pgscan_kswapd - spp->pgscan_direct) : 0.0,
+	       S_VALUE(spp->pgpromote, spc->pgpromote, itv),
+	       NULL);
+
+	render(isdb, pre, pt_newlin,
+	       "-\tpgdem/s", NULL, NULL,
+	       NOVAL,
+	       S_VALUE(spp->pgdemote, spc->pgdemote, itv),
 	       NULL);
 }
 
@@ -682,7 +735,7 @@ __print_funct_t render_io_stats(struct activity *a, int isdb, char *pre,
 		*sic = (struct stats_io *) a->buf[curr],
 		*sip = (struct stats_io *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	/*
 	 * If we get negative values, this is probably because
@@ -741,6 +794,123 @@ __print_funct_t render_io_stats(struct activity *a, int isdb, char *pre,
 }
 
 /*
+ * **************************************************************************
+ * Display RAM memory utilization in selected format.
+ *
+ * IN:
+ * @smc		Structure with statistics.
+ * @isdb	Flag, true if db printing, false if ppc printing.
+ * @pre		Prefix string for output entries.
+ * @dispall	TRUE if all memory fields should be displayed.
+ * @pt_newlin	Rendering flag for last displayed field.
+ ***************************************************************************
+ */
+void render_ram_memory_stats(struct stats_memory *smc, int isdb, char *pre,
+			     int dispall, int pt_newlin)
+{
+	unsigned long long nousedmem;
+	int ptn;
+
+	nousedmem = smc->frmkb + smc->bufkb + smc->camkb + smc->slabkb;
+	if (nousedmem > smc->tlmkb) {
+		nousedmem = smc->tlmkb;
+	}
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbmemfree", NULL, NULL, smc->frmkb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbavail", NULL, NULL, smc->availablekb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbmemused", NULL, NULL, smc->tlmkb - nousedmem, DNOVAL, NULL);
+
+	render(isdb, pre, PT_NOFLAG,
+	       "-\t%memused", NULL, NULL, NOVAL,
+	       smc->tlmkb ? SP_VALUE(nousedmem, smc->tlmkb, smc->tlmkb)
+			  : 0.0,
+	       NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbbuffers", NULL, NULL, smc->bufkb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbcached", NULL, NULL, smc->camkb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbcommit", NULL, NULL, smc->comkb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_NOFLAG,
+	       "-\t%commit", NULL, NULL, NOVAL,
+	       (smc->tlmkb + smc->tlskb) ? SP_VALUE(0, smc->comkb, smc->tlmkb + smc->tlskb)
+					 : 0.0,
+	       NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbactive", NULL, NULL, smc->activekb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbinact", NULL, NULL, smc->inactkb, DNOVAL, NULL);
+
+	ptn = dispall ? 0 : pt_newlin;
+	render(isdb, pre, PT_USEINT | ptn,
+	       "-\tkbdirty", NULL, NULL, smc->dirtykb, DNOVAL, NULL);
+
+	if (dispall) {
+		render(isdb, pre, PT_USEINT,
+		       "-\tkbanonpg", NULL, NULL, smc->anonpgkb, DNOVAL, NULL);
+
+		render(isdb, pre, PT_USEINT,
+		       "-\tkbslab", NULL, NULL, smc->slabkb, DNOVAL, NULL);
+
+		render(isdb, pre, PT_USEINT,
+		       "-\tkbkstack", NULL, NULL, smc->kstackkb, DNOVAL, NULL);
+
+		render(isdb, pre, PT_USEINT,
+		       "-\tkbpgtbl", NULL, NULL, smc->pgtblkb, DNOVAL, NULL);
+
+		render(isdb, pre, PT_USEINT | pt_newlin,
+		       "-\tkbvmused", NULL, NULL, smc->vmusedkb, DNOVAL, NULL);
+	}
+}
+
+/*
+ * **************************************************************************
+ * Display swap memory utilization in selected format.
+ *
+ * IN:
+ * @smc		Structure with statistics.
+ * @isdb	Flag, true if db printing, false if ppc printing.
+ * @pre		Prefix string for output entries.
+ * @pt_newlin	Rendering flag for last displayed field.
+ ***************************************************************************
+ */
+void render_swap_memory_stats(struct stats_memory *smc, int isdb, char *pre,
+			      int pt_newlin)
+{
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbswpfree", NULL, NULL, smc->frskb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbswpused", NULL, NULL, smc->tlskb - smc->frskb, DNOVAL, NULL);
+
+	render(isdb, pre, PT_NOFLAG,
+	       "-\t%swpused", NULL, NULL, NOVAL,
+	       smc->tlskb ? SP_VALUE(smc->frskb, smc->tlskb, smc->tlskb)
+			  : 0.0,
+	       NULL);
+
+	render(isdb, pre, PT_USEINT,
+	       "-\tkbswpcad", NULL, NULL, smc->caskb, DNOVAL, NULL);
+
+	render(isdb, pre, pt_newlin,
+	       "-\t%swpcad", NULL, NULL, NOVAL,
+	       (smc->tlskb - smc->frskb) ? SP_VALUE(0, smc->caskb, smc->tlskb - smc->frskb)
+					 : 0.0,
+	       NULL);
+}
+
+/*
  ***************************************************************************
  * Display memory and swap statistics in selected format.
  *
@@ -758,114 +928,14 @@ __print_funct_t render_memory_stats(struct activity *a, int isdb, char *pre,
 	struct stats_memory
 		*smc = (struct stats_memory *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
-	int ptn;
-	unsigned long long nousedmem;
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	if (DISPLAY_MEMORY(a->opt_flags)) {
-
-		nousedmem = smc->frmkb + smc->bufkb + smc->camkb + smc->slabkb;
-		if (nousedmem > smc->tlmkb) {
-			nousedmem = smc->tlmkb;
-		}
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbmemfree", NULL, NULL,
-		       smc->frmkb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbavail", NULL, NULL,
-		       smc->availablekb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbmemused", NULL, NULL,
-		       smc->tlmkb - nousedmem, DNOVAL, NULL);
-
-		render(isdb, pre, PT_NOFLAG,
-		       "-\t%memused", NULL, NULL, NOVAL,
-		       smc->tlmkb ?
-		       SP_VALUE(nousedmem, smc->tlmkb, smc->tlmkb) :
-		       0.0, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbbuffers", NULL, NULL,
-		       smc->bufkb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbcached", NULL, NULL,
-		       smc->camkb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbcommit", NULL, NULL,
-		       smc->comkb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_NOFLAG,
-		       "-\t%commit", NULL, NULL, NOVAL,
-		       (smc->tlmkb + smc->tlskb) ?
-		       SP_VALUE(0, smc->comkb, smc->tlmkb + smc->tlskb) :
-		       0.0, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbactive", NULL, NULL,
-		       smc->activekb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbinact", NULL, NULL,
-		       smc->inactkb, DNOVAL, NULL);
-
-		ptn = DISPLAY_MEM_ALL(a->opt_flags) ? 0 : pt_newlin;
-		render(isdb, pre, PT_USEINT | ptn,
-		       "-\tkbdirty", NULL, NULL,
-		       smc->dirtykb, DNOVAL, NULL);
-
-		if (DISPLAY_MEM_ALL(a->opt_flags)) {
-			render(isdb, pre, PT_USEINT,
-			       "-\tkbanonpg", NULL, NULL,
-			       smc->anonpgkb, DNOVAL, NULL);
-
-			render(isdb, pre, PT_USEINT,
-			       "-\tkbslab", NULL, NULL,
-			       smc->slabkb, DNOVAL, NULL);
-
-			render(isdb, pre, PT_USEINT,
-			       "-\tkbkstack", NULL, NULL,
-			       smc->kstackkb, DNOVAL, NULL);
-
-			render(isdb, pre, PT_USEINT,
-			       "-\tkbpgtbl", NULL, NULL,
-			       smc->pgtblkb, DNOVAL, NULL);
-
-			render(isdb, pre, PT_USEINT | pt_newlin,
-			       "-\tkbvmused", NULL, NULL,
-			       smc->vmusedkb, DNOVAL, NULL);
-		}
+		render_ram_memory_stats(smc, isdb, pre, DISPLAY_MEM_ALL(a->opt_flags), pt_newlin);
 	}
 
 	if (DISPLAY_SWAP(a->opt_flags)) {
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbswpfree", NULL, NULL,
-		       smc->frskb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbswpused", NULL, NULL,
-		       smc->tlskb - smc->frskb, DNOVAL, NULL);
-
-		render(isdb, pre, PT_NOFLAG,
-		       "-\t%swpused", NULL, NULL, NOVAL,
-		       smc->tlskb ?
-		       SP_VALUE(smc->frskb, smc->tlskb, smc->tlskb) :
-		       0.0, NULL);
-
-		render(isdb, pre, PT_USEINT,
-		       "-\tkbswpcad", NULL, NULL,
-		       smc->caskb, DNOVAL, NULL);
-
-		render(isdb, pre, pt_newlin,
-		       "-\t%swpcad", NULL, NULL, NOVAL,
-		       (smc->tlskb - smc->frskb) ?
-		       SP_VALUE(0, smc->caskb, smc->tlskb - smc->frskb) :
-		       0.0, NULL);
+		render_swap_memory_stats(smc, isdb, pre, pt_newlin);
 	}
 }
 
@@ -887,7 +957,7 @@ __print_funct_t render_ktables_stats(struct activity *a, int isdb, char *pre,
 	struct stats_ktables
 		*skc = (struct stats_ktables *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_USEINT,
 	       "-\tdentunusd", NULL, NULL,
@@ -924,7 +994,7 @@ __print_funct_t render_queue_stats(struct activity *a, int isdb, char *pre,
 	struct stats_queue
 		*sqc = (struct stats_queue *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_USEINT,
 	       "-\trunq-sz", NULL, NULL,
@@ -975,7 +1045,7 @@ __print_funct_t render_serial_stats(struct activity *a, int isdb, char *pre,
 	int i, j, j0, found;
 	struct stats_serial *ssc, *ssp;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; i < a->nr[curr]; i++) {
 
@@ -1073,7 +1143,7 @@ __print_funct_t render_disk_stats(struct activity *a, int isdb, char *pre,
 	struct ext_disk_stats xds;
 	char *dev_name;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	memset(&sdpzero, 0, STATS_DISK_SIZE);
 
@@ -1107,56 +1177,56 @@ __print_funct_t render_disk_stats(struct activity *a, int isdb, char *pre,
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttps", "%s",
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sdp->nr_ios, sdc->nr_ios, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trkB/s", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sdp->rd_sect, sdc->rd_sect, itv) / 2,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\twkB/s", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sdp->wr_sect, sdc->wr_sect, itv) / 2,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tdkB/s", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sdp->dc_sect, sdc->dc_sect, itv) / 2,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tareq-sz", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       xds.arqsz / 2,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\taqu-sz", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sdp->rq_ticks, sdc->rq_ticks, itv) / 1000.0,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tawait", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       xds.await,
 		       NULL);
 
 		render(isdb, pre, pt_newlin,
 		       "%s\t%%util", NULL,
-		       cons(sv, dev_name, NULL),
+		       cons(sv, dev_name, NOVAL),
 		       NOVAL,
 		       xds.util / 10.0,
 		       NULL);
@@ -1182,7 +1252,7 @@ __print_funct_t render_net_dev_stats(struct activity *a, int isdb, char *pre,
 	struct stats_net_dev *sndc, *sndp, sndzero;
 	double rxkb, txkb, ifutil;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	memset(&sndzero, 0, STATS_NET_DEV_SIZE);
 
@@ -1208,14 +1278,14 @@ __print_funct_t render_net_dev_stats(struct activity *a, int isdb, char *pre,
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxpck/s", "%s",
-		       cons(sv, sndc->interface, NULL), /* What if the format args are strings? */
+		       cons(sv, sndc->interface, NOVAL), /* What if the format args are strings? */
 		       NOVAL,
 		       S_VALUE(sndp->rx_packets, sndc->rx_packets, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxpck/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(sndp->tx_packets, sndc->tx_packets, itv),
 		       NULL);
@@ -1223,7 +1293,7 @@ __print_funct_t render_net_dev_stats(struct activity *a, int isdb, char *pre,
 		rxkb = S_VALUE(sndp->rx_bytes, sndc->rx_bytes, itv);
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxkB/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       rxkb / 1024,
 		       NULL);
@@ -1231,28 +1301,28 @@ __print_funct_t render_net_dev_stats(struct activity *a, int isdb, char *pre,
 		txkb = S_VALUE(sndp->tx_bytes, sndc->tx_bytes, itv);
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxkB/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       txkb / 1024,
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxcmp/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(sndp->rx_compressed, sndc->rx_compressed, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxcmp/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(sndp->tx_compressed, sndc->tx_compressed, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxmcst/s", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(sndp->multicast, sndc->multicast, itv),
 		       NULL);
@@ -1260,7 +1330,7 @@ __print_funct_t render_net_dev_stats(struct activity *a, int isdb, char *pre,
 		ifutil = compute_ifutil(sndc, rxkb, txkb);
 		render(isdb, pre, pt_newlin,
 		       "%s\t%%ifutil", NULL,
-		       cons(sv, sndc->interface, NULL),
+		       cons(sv, sndc->interface, NOVAL),
 		       NOVAL,
 		       ifutil,
 		       NULL);
@@ -1285,7 +1355,7 @@ __print_funct_t render_net_edev_stats(struct activity *a, int isdb, char *pre,
 	int i, j;
 	struct stats_net_edev *snedc, *snedp, snedzero;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	memset(&snedzero, 0, STATS_NET_EDEV_SIZE);
 
@@ -1311,63 +1381,63 @@ __print_funct_t render_net_edev_stats(struct activity *a, int isdb, char *pre,
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxerr/s", "%s",
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->rx_errors, snedc->rx_errors, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxerr/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->tx_errors, snedc->tx_errors, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tcoll/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->collisions, snedc->collisions, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxdrop/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->rx_dropped, snedc->rx_dropped, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxdrop/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->tx_dropped, snedc->tx_dropped, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\ttxcarr/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->tx_carrier_errors, snedc->tx_carrier_errors, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxfram/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->rx_frame_errors, snedc->rx_frame_errors, itv),
 		       NULL);
 
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\trxfifo/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->rx_fifo_errors, snedc->rx_fifo_errors, itv),
 		       NULL);
 
 		render(isdb, pre, pt_newlin,
 		       "%s\ttxfifo/s", NULL,
-		       cons(sv, snedc->interface, NULL),
+		       cons(sv, snedc->interface, NOVAL),
 		       NOVAL,
 		       S_VALUE(snedp->tx_fifo_errors, snedc->tx_fifo_errors, itv),
 		       NULL);
@@ -1393,7 +1463,7 @@ __print_funct_t render_net_nfs_stats(struct activity *a, int isdb, char *pre,
 		*snnc = (struct stats_net_nfs *) a->buf[curr],
 		*snnp = (struct stats_net_nfs *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tcall/s", NULL, NULL,
@@ -1451,7 +1521,7 @@ __print_funct_t render_net_nfsd_stats(struct activity *a, int isdb, char *pre,
 		*snndc = (struct stats_net_nfsd *) a->buf[curr],
 		*snndp = (struct stats_net_nfsd *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tscall/s", NULL, NULL,
@@ -1538,7 +1608,7 @@ __print_funct_t render_net_sock_stats(struct activity *a, int isdb, char *pre,
 	struct stats_net_sock
 		*snsc = (struct stats_net_sock *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_USEINT,
 	       "-\ttotsck", NULL, NULL,
@@ -1584,7 +1654,7 @@ __print_funct_t render_net_ip_stats(struct activity *a, int isdb, char *pre,
 		*snic = (struct stats_net_ip *) a->buf[curr],
 		*snip = (struct stats_net_ip *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tirec/s", NULL, NULL,
@@ -1654,7 +1724,7 @@ __print_funct_t render_net_eip_stats(struct activity *a, int isdb, char *pre,
 		*sneic = (struct stats_net_eip *) a->buf[curr],
 		*sneip = (struct stats_net_eip *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tihdrerr/s", NULL, NULL,
@@ -1724,7 +1794,7 @@ __print_funct_t render_net_icmp_stats(struct activity *a, int isdb, char *pre,
 		*snic = (struct stats_net_icmp *) a->buf[curr],
 		*snip = (struct stats_net_icmp *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\timsg/s", NULL, NULL,
@@ -1830,7 +1900,7 @@ __print_funct_t render_net_eicmp_stats(struct activity *a, int isdb, char *pre,
 		*sneic = (struct stats_net_eicmp *) a->buf[curr],
 		*sneip = (struct stats_net_eicmp *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tierr/s", NULL, NULL,
@@ -1924,7 +1994,7 @@ __print_funct_t render_net_tcp_stats(struct activity *a, int isdb, char *pre,
 		*sntc = (struct stats_net_tcp *) a->buf[curr],
 		*sntp = (struct stats_net_tcp *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tactive/s", NULL, NULL,
@@ -1970,7 +2040,7 @@ __print_funct_t render_net_etcp_stats(struct activity *a, int isdb, char *pre,
 		*snetc = (struct stats_net_etcp *) a->buf[curr],
 		*snetp = (struct stats_net_etcp *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tatmptf/s", NULL, NULL,
@@ -2022,7 +2092,7 @@ __print_funct_t render_net_udp_stats(struct activity *a, int isdb, char *pre,
 		*snuc = (struct stats_net_udp *) a->buf[curr],
 		*snup = (struct stats_net_udp *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tidgm/s", NULL, NULL,
@@ -2067,7 +2137,7 @@ __print_funct_t render_net_sock6_stats(struct activity *a, int isdb, char *pre,
 	struct stats_net_sock6
 		*snsc = (struct stats_net_sock6 *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_USEINT,
 	       "-\ttcp6sck", NULL, NULL,
@@ -2105,7 +2175,7 @@ __print_funct_t render_net_ip6_stats(struct activity *a, int isdb, char *pre,
 		*snic = (struct stats_net_ip6 *) a->buf[curr],
 		*snip = (struct stats_net_ip6 *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tirec6/s", NULL, NULL,
@@ -2187,7 +2257,7 @@ __print_funct_t render_net_eip6_stats(struct activity *a, int isdb, char *pre,
 		*sneic = (struct stats_net_eip6 *) a->buf[curr],
 		*sneip = (struct stats_net_eip6 *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tihdrer6/s", NULL, NULL,
@@ -2275,7 +2345,7 @@ __print_funct_t render_net_icmp6_stats(struct activity *a, int isdb, char *pre,
 		*snic = (struct stats_net_icmp6 *) a->buf[curr],
 		*snip = (struct stats_net_icmp6 *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\timsg6/s", NULL, NULL,
@@ -2399,7 +2469,7 @@ __print_funct_t render_net_eicmp6_stats(struct activity *a, int isdb, char *pre,
 		*sneic = (struct stats_net_eicmp6 *) a->buf[curr],
 		*sneip = (struct stats_net_eicmp6 *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tierr6/s", NULL, NULL,
@@ -2487,7 +2557,7 @@ __print_funct_t render_net_udp6_stats(struct activity *a, int isdb, char *pre,
 		*snuc = (struct stats_net_udp6 *) a->buf[curr],
 		*snup = (struct stats_net_udp6 *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\tidgm6/s", NULL, NULL,
@@ -2532,7 +2602,7 @@ __print_funct_t render_pwr_cpufreq_stats(struct activity *a, int isdb, char *pre
 	int i;
 	struct stats_pwr_cpufreq *spc;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; (i < a->nr[curr]) && (i < a->bitmap->b_size + 1); i++) {
 
@@ -2585,7 +2655,7 @@ __print_funct_t render_pwr_fan_stats(struct activity *a, int isdb, char *pre,
 	int i;
 	struct stats_pwr_fan *spc;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; i < a->nr[curr]; i++) {
 		spc = (struct stats_pwr_fan *) ((char *) a->buf[curr] + i * a->msize);
@@ -2634,7 +2704,7 @@ __print_funct_t render_pwr_temp_stats(struct activity *a, int isdb, char *pre,
 	int i;
 	struct stats_pwr_temp *spc;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; i < a->nr[curr]; i++) {
 		spc = (struct stats_pwr_temp *) ((char *) a->buf[curr] + i * a->msize);
@@ -2685,7 +2755,7 @@ __print_funct_t render_pwr_in_stats(struct activity *a, int isdb, char *pre,
 	int i;
 	struct stats_pwr_in *spc;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; i < a->nr[curr]; i++) {
 		spc = (struct stats_pwr_in *) ((char *) a->buf[curr] + i * a->msize);
@@ -2736,7 +2806,7 @@ __print_funct_t render_huge_stats(struct activity *a, int isdb, char *pre,
 	struct stats_huge
 		*smc = (struct stats_huge *) a->buf[curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_USEINT,
 	       "-\tkbhugfree", NULL, NULL,
@@ -2780,7 +2850,7 @@ __print_funct_t render_pwr_wghfreq_stats(struct activity *a, int isdb, char *pre
 	struct stats_pwr_wghfreq *spc, *spp, *spc_k, *spp_k;
 	unsigned long long tis, tisfreq;
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; (i < a->nr[curr]) && (i < a->bitmap->b_size + 1); i++) {
 
@@ -2912,6 +2982,8 @@ __print_funct_t render_filesystem_stats(struct activity *a, int isdb, char *pre,
 	int i;
 	struct stats_filesystem *sfc;
 	char *dev_name;
+	int pt_newlin
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	for (i = 0; i < a->nr[curr]; i++) {
 		sfc = (struct stats_filesystem *) ((char *) a->buf[curr] + i * a->msize);
@@ -2976,8 +3048,7 @@ __print_funct_t render_filesystem_stats(struct activity *a, int isdb, char *pre,
 		       NOVAL,
 		       NULL);
 
-		render(isdb, pre,
-		       (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN),
+		render(isdb, pre, pt_newlin,
 		       "%s\t%%Iused",
 		       NULL,
 		       cons(sv, dev_name, NOVAL),
@@ -3005,6 +3076,8 @@ __print_funct_t render_fchost_stats(struct activity *a, int isdb, char *pre,
 {
 	int i, j, j0, found;
 	struct stats_fchost *sfcc, *sfcp, sfczero;
+	int pt_newlin
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	memset(&sfczero, 0, sizeof(struct stats_fchost));
 
@@ -3050,20 +3123,19 @@ __print_funct_t render_fchost_stats(struct activity *a, int isdb, char *pre,
 	               NULL);
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tfch_txf/s", NULL,
-		       cons(sv, sfcc->fchost_name, NULL),
+		       cons(sv, sfcc->fchost_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sfcp->f_txframes, sfcc->f_txframes, itv),
 		       NULL);
 		render(isdb, pre, PT_NOFLAG,
 		       "%s\tfch_rxw/s", NULL,
-		       cons(sv, sfcc->fchost_name, NULL),
+		       cons(sv, sfcc->fchost_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sfcp->f_rxwords, sfcc->f_rxwords, itv),
 		       NULL);
-		render(isdb, pre,
-		       (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN),
+		render(isdb, pre, pt_newlin,
 		       "%s\tfch_txw/s", NULL,
-		       cons(sv, sfcc->fchost_name, NULL),
+		       cons(sv, sfcc->fchost_name, NOVAL),
 		       NOVAL,
 		       S_VALUE(sfcp->f_txwords, sfcc->f_txwords, itv),
 		       NULL);
@@ -3089,7 +3161,7 @@ __print_funct_t render_softnet_stats(struct activity *a, int isdb, char *pre,
 	struct stats_softnet *ssnc, *ssnp;
 	unsigned char offline_cpu_bitmap[BITMAP_SIZE(NR_CPUS)] = {0};
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	/* @nr[curr] cannot normally be greater than @nr_ini */
 	if (a->nr[curr] > a->nr_ini) {
@@ -3152,11 +3224,18 @@ __print_funct_t render_softnet_stats(struct activity *a, int isdb, char *pre,
 			       S_VALUE(ssnp->received_rps, ssnc->received_rps, itv),
 			       NULL);
 
-			render(isdb, pre, pt_newlin,
+			render(isdb, pre, PT_NOFLAG,
 			       "all\tflw_lim/s",
 			       NULL, NULL,
 			       NOVAL,
 			       S_VALUE(ssnp->flow_limit, ssnc->flow_limit, itv),
+			       NULL);
+
+			render(isdb, pre, PT_USEINT | pt_newlin,
+			       "all\tblg_len",
+			       NULL, NULL,
+			       ssnc->backlog_len,
+			       DNOVAL,
 			       NULL);
 		}
 		else {
@@ -3188,11 +3267,18 @@ __print_funct_t render_softnet_stats(struct activity *a, int isdb, char *pre,
 			       S_VALUE(ssnp->received_rps, ssnc->received_rps, itv),
 			       NULL);
 
-			render(isdb, pre, pt_newlin,
+			render(isdb, pre, PT_NOFLAG,
 			       "cpu%d\tflw_lim/s",
 			       NULL, cons(iv, i - 1, NOVAL),
 			       NOVAL,
 			       S_VALUE(ssnp->flow_limit, ssnc->flow_limit, itv),
+			       NULL);
+
+			render(isdb, pre, PT_USEINT | pt_newlin,
+			       "cpu%d\tblg_len",
+			       NULL, cons(iv, i - 1, NOVAL),
+			       ssnc->backlog_len,
+			       DNOVAL,
 			       NULL);
 		}
 	}
@@ -3217,7 +3303,7 @@ __print_funct_t render_psicpu_stats(struct activity *a, int isdb, char *pre,
 		*psic = (struct stats_psi_cpu *) a->buf[curr],
 		*psip = (struct stats_psi_cpu *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\t%scpu-10", NULL, NULL,
@@ -3263,7 +3349,7 @@ __print_funct_t render_psiio_stats(struct activity *a, int isdb, char *pre,
 		*psic = (struct stats_psi_io *) a->buf[curr],
 		*psip = (struct stats_psi_io *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\t%sio-10", NULL, NULL,
@@ -3333,7 +3419,7 @@ __print_funct_t render_psimem_stats(struct activity *a, int isdb, char *pre,
 		*psic = (struct stats_psi_mem *) a->buf[curr],
 		*psip = (struct stats_psi_mem *) a->buf[!curr];
 	int pt_newlin
-		= (DISPLAY_HORIZONTALLY(flags) ? PT_NOFLAG : PT_NEWLIN);
+		= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
 
 	render(isdb, pre, PT_NOFLAG,
 	       "-\t%smem-10", NULL, NULL,
@@ -3382,4 +3468,54 @@ __print_funct_t render_psimem_stats(struct activity *a, int isdb, char *pre,
 	       NOVAL,
 	       ((double) psic->full_mem_total - psip->full_mem_total) / (100 * itv),
 	       NULL);
+}
+
+/*
+ * **************************************************************************
+ * Display battery statistics in selected format.
+ *
+ * IN:
+ * @a		Activity structure with statistics.
+ * @isdb	Flag, true if db printing, false if ppc printing.
+ * @pre		Prefix string for output entries
+ * @curr	Index in array for current sample statistics.
+ * @itv		Interval of time in 1/100th of a second.
+ ***************************************************************************
+ */
+__print_funct_t render_pwr_bat_stats(struct activity *a, int isdb, char *pre,
+				     int curr, unsigned long long itv)
+{
+	int i;
+	struct stats_pwr_bat *spbc, *spbp;
+	int pt_newlin
+	= PT_NOFLAG + (DISPLAY_HORIZONTALLY(flags) ? 0 : PT_NEWLIN);
+
+	for (i = 0; i < a->nr[curr]; i++) {
+
+		spbc = (struct stats_pwr_bat *) ((char *) a->buf[curr] + i * a->msize);
+		spbp = (struct stats_pwr_bat *) ((char *) a->buf[!curr] + i * a->msize);
+
+		render(isdb, pre, PT_USEINT,
+		       "BAT%d\t%%cap", "%d",
+		       cons(iv, spbc->bat_id, NOVAL),
+		       (unsigned int) spbc->capacity,
+		       NOVAL, NULL);
+
+		render(isdb, pre, PT_NOFLAG,
+		       "BAT%d\tcap/min", NULL,
+		       cons(iv, spbc->bat_id, NOVAL),
+		       NOVAL,
+		       (double) (spbc->capacity - spbp->capacity) * 6000 / itv,
+		       NULL);
+
+		/* Battery status code should not be greater than or equal to BAT_STS_NR */
+		if (spbc->status >= BAT_STS_NR) {
+			spbc->status = 0;
+		}
+		render(isdb, pre, PT_USESTR | pt_newlin,
+		       "BAT%d\tstatus", NULL,
+		       cons(iv, spbc->bat_id, NOVAL),
+		       NOVAL, NOVAL,
+		       bat_status[(unsigned int) spbc->status]);
+	}
 }

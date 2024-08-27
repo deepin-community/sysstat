@@ -1,6 +1,6 @@
 /*
  * count.c: Count items for which statistics will be collected.
- * (C) 1999-2020 by Sebastien GODARD (sysstat <at> orange.fr)
+ * (C) 1999-2023 by Sebastien GODARD (sysstat <at> orange.fr)
  *
  ***************************************************************************
  * This program is free software; you can redistribute it and/or modify it *
@@ -154,6 +154,9 @@ int get_proc_cpu_nr(void)
  *    one have been disabled, we get the total number of proc since we use
  *    /sys to count them).
  * 2: two proc...
+ *
+ * USED BY:
+ * sadc, cifsiostat, iostat, mpstat, pidstat, tapestat
  ***************************************************************************
  */
 __nr_t get_cpu_nr(unsigned int max_nr_cpus, int highest)
@@ -186,6 +189,9 @@ __nr_t get_cpu_nr(unsigned int max_nr_cpus, int highest)
  *
  * RETURNS:
  * Number of interrupts per processor.
+ *
+ * USED BY:
+ * sadc, mpstat
  ***************************************************************************
  */
 __nr_t get_irqcpu_nr(char *file, int max_nr_irqcpu, int cpu_nr)
@@ -202,6 +208,7 @@ __nr_t get_irqcpu_nr(char *file, int max_nr_irqcpu, int cpu_nr)
 
 	while ((fgets(line, INTERRUPTS_LINE + 11 * cpu_nr , fp) != NULL) &&
 	       (irq < max_nr_irqcpu)) {
+
 		p = strcspn(line, ":");
 		if ((p > 0) && (p < 16)) {
 			irq++;
@@ -214,6 +221,9 @@ __nr_t get_irqcpu_nr(char *file, int max_nr_irqcpu, int cpu_nr)
 
 	return irq;
 }
+
+#ifdef SOURCE_SADC
+/*---------------- BEGIN: FUNCTIONS USED BY SADC ONLY ---------------------*/
 
 /*
  ***************************************************************************
@@ -247,8 +257,9 @@ __nr_t get_diskstats_dev_nr(int count_part, int only_used_dev)
 	 * the number of lines...
 	 */
 	while (fgets(line, sizeof(line), fp) != NULL) {
+
 		if (!count_part) {
-			i = sscanf(line, "%*d %*d %s %lu %*u %*u %*u %lu",
+			i = sscanf(line, "%*d %*d %127s %lu %*u %*u %*u %lu",
 				   dev_name, &rd_ios, &wr_ios);
 			if ((i == 2) || !is_device(SLASH_SYS, dev_name, ACCEPT_VIRTUAL_DEVICES))
 				/* It was a partition and not a device */
@@ -263,43 +274,6 @@ __nr_t get_diskstats_dev_nr(int count_part, int only_used_dev)
 	fclose(fp);
 
 	return dev;
-}
-
-#ifdef SOURCE_SADC
-/*---------------- BEGIN: FUNCTIONS USED BY SADC ONLY ---------------------*/
-
-/*
- ***************************************************************************
- * Count number of interrupts that are in /proc/stat file.
- *
- * RETURNS:
- * Number of interrupts, including total number of interrupts.
- ***************************************************************************
- */
-__nr_t get_irq_nr(void)
-{
-	FILE *fp;
-	char line[8192];
-	__nr_t in = 0;
-	int pos = 4;
-
-	if ((fp = fopen(STAT, "r")) == NULL)
-		return 0;
-
-	while (fgets(line, sizeof(line), fp) != NULL) {
-
-		if (!strncmp(line, "intr ", 5)) {
-
-			while (pos < strlen(line)) {
-				in++;
-				pos += strcspn(line + pos + 1, " ") + 1;
-			}
-		}
-	}
-
-	fclose(fp);
-
-	return in;
 }
 
 /*
@@ -466,7 +440,7 @@ __nr_t get_filesystem_nr(void)
 	char line[512], fs_name[MAX_FS_LEN], mountp[256], type[128];
 	char *pos = 0, *pos2 = 0;
 	__nr_t fs = 0;
-	int skip = 0, skip_next = 0;
+	int skip, skip_next = 0;
 	struct statvfs buf;
 
 	if ((fp = fopen(MTAB, "r")) == NULL)
@@ -501,7 +475,7 @@ __nr_t get_filesystem_nr(void)
 				continue;
 
 			sscanf(pos2 + 1, "%127s", type);
-			if(strcmp(type, "autofs") == 0)
+			if (strcmp(type, "autofs") == 0)
 				continue;
 
 			/* Read filesystem name and mount point */
@@ -557,6 +531,41 @@ __nr_t get_fchost_nr(void)
 	closedir(dir);
 
 	return fc;
+}
+
+/*
+ * **************************************************************************
+ * Find number of batteries in /sys/class/power_supply/.
+ * Assume that batteries keep their id number (0, 1...) as long as the
+ * computer is not restarted.
+ *
+ * RETURNS:
+ * Number of batteries.
+ * Return -1 if directory doesn't exist in sysfs.
+ ***************************************************************************
+ */
+__nr_t get_bat_nr(void)
+{
+	DIR *dir;
+	struct dirent *drd;
+	__nr_t bat = 0;
+
+	if ((dir = opendir(SYSFS_PWR_SUPPLY)) == NULL) {
+		/* Directory non-existent */
+		return -1;
+	}
+
+	while ((drd = readdir(dir)) != NULL) {
+
+		if (!strncmp(drd->d_name, "BAT", 3) && isdigit(drd->d_name[3])) {
+			bat++;
+		}
+	}
+
+	/* Close directory */
+	closedir(dir);
+
+	return bat;
 }
 
 /*------------------ END: FUNCTIONS USED BY SADC ONLY ---------------------*/

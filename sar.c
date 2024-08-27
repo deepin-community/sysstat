@@ -1,6 +1,6 @@
 /*
  * sar: report system activity
- * (C) 1999-2020 by Sebastien GODARD (sysstat <at> orange.fr)
+ * (C) 1999-2023 by Sebastien GODARD (sysstat <at> orange.fr)
  *
  ***************************************************************************
  * This program is free software; you can redistribute it and/or modify it *
@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <ctype.h>
 
 #include "version.h"
 #include "sa.h"
@@ -55,6 +56,11 @@ long interval = -1, count = 0;
 
 /* TRUE if a header line must be printed */
 int dish = TRUE;
+/*
+ * TRUE if min/max values should be initialized.
+ * Note: Never set to TRUE if option -x has not been used with sar.
+ */
+int xinit = FALSE;
 /* TRUE if data read from file don't match current machine's endianness */
 int endian_mismatch = FALSE;
 /* TRUE if file's data come from a 64 bit machine */
@@ -62,7 +68,8 @@ int arch_64 = FALSE;
 /* Number of decimal places */
 int dplaces_nr = -1;
 
-uint64_t flags = 0;
+/* sar always displays timestamps in local time */
+uint64_t flags = S_F_LOCAL_TIME;
 
 char timestamp[2][TIMESTAMP_LEN];
 extern unsigned int rec_types_nr[];
@@ -81,10 +88,10 @@ struct record_header record_hdr[3];
  */
 unsigned int id_seq[NR_ACT];
 
-struct tm rectime;
+struct tstamp_ext rectime;
 
 /* Contain the date specified by -s and -e options */
-struct tstamp tm_start, tm_end;
+struct tstamp_ext tm_start, tm_end;
 
 char *args[MAX_ARGV_NR];
 
@@ -122,15 +129,16 @@ void usage(char *progname)
 	fprintf(stderr, _("Options are:\n"
 			  "[ -A ] [ -B ] [ -b ] [ -C ] [ -D ] [ -d ] [ -F [ MOUNT ] ] [ -H ] [ -h ]\n"
 			  "[ -p ] [ -r [ ALL ] ] [ -S ] [ -t ] [ -u [ ALL ] ] [ -V ]\n"
-			  "[ -v ] [ -W ] [ -w ] [ -y ] [ -z ]\n"
-			  "[ -I { <int_list> | SUM | ALL } ] [ -P { <cpu_list> | ALL } ]\n"
+			  "[ -v ] [ -W ] [ -w ] [ -x ] [ -y ] [ -z ]\n"
+			  "[ -I [ SUM | ALL ] ] [ -P { <cpu_list> | ALL } ]\n"
 			  "[ -m { <keyword> [,...] | ALL } ] [ -n { <keyword> [,...] | ALL } ]\n"
 			  "[ -q [ <keyword> [,...] | ALL ] ]\n"
-			  "[ --dev=<dev_list> ] [ --fs=<fs_list> ] [ --iface=<iface_list> ]\n"
+			  "[ --dev=<dev_list> ] [ --fs=<fs_list> ] [ --iface=<iface_list> ] "
+			  "[ --int=<int_list> ]\n"
 			  "[ --dec={ 0 | 1 | 2 } ] [ --help ] [ --human ] [ --pretty ] [ --sadc ]\n"
 			  "[ -j { SID | ID | LABEL | PATH | UUID | ... } ]\n"
 			  "[ -f [ <filename> ] | -o [ <filename> ] | -[0-9]+ ]\n"
-			  "[ -i <interval> ] [ -s [ <hh:mm[:ss]> ] ] [ -e [ <hh:mm[:ss]> ] ]\n"));
+			  "[ -i <interval> ] [ -s [ <start_time> ] ] [ -e [ <end_time> ] ]\n"));
 	exit(1);
 }
 
@@ -152,11 +160,12 @@ void display_help(char *progname)
 	printf(_("\t-F [ MOUNT ]\n"));
 	printf(_("\t\tFilesystems statistics [A_FS]\n"));
 	printf(_("\t-H\tHugepages utilization statistics [A_HUGE]\n"));
-	printf(_("\t-I { <int_list> | SUM | ALL }\n"
+	printf(_("\t-I [ SUM | ALL ]\n"
 		 "\t\tInterrupts statistics [A_IRQ]\n"));
 	printf(_("\t-m { <keyword> [,...] | ALL }\n"
 		 "\t\tPower management statistics [A_PWR_...]\n"
 		 "\t\tKeywords are:\n"
+		 "\t\tBAT\tBatteries capacity\n"
 		 "\t\tCPU\tCPU instantaneous clock frequency\n"
 		 "\t\tFAN\tFans speed\n"
 		 "\t\tFREQ\tCPU average clock frequency\n"
@@ -277,7 +286,7 @@ void salloc(int i, char *ltemp)
  * @error_code	Code of error message to display.
  ***************************************************************************
  */
-void print_read_error(int error_code)
+void print_read_error(enum sa_err_codes error_code)
 {
 	switch (error_code) {
 
@@ -381,7 +390,13 @@ void write_stats_avg(int curr, int read_from_file, unsigned int act_id)
 
 	strncpy(timestamp[curr], _("Average:"), sizeof(timestamp[curr]));
 	timestamp[curr][sizeof(timestamp[curr]) - 1] = '\0';
-	memcpy(timestamp[!curr], timestamp[curr], sizeof(timestamp[!curr]));
+	if (DISPLAY_MINMAX(flags)) {
+		strncpy(timestamp[!curr], _("Summary:"), sizeof(timestamp[!curr]));
+		timestamp[!curr][sizeof(timestamp[!curr]) - 1] = '\0';
+	}
+	else {
+		memcpy(timestamp[!curr], timestamp[curr], sizeof(timestamp[!curr]));
+	}
 
 	/* Test stdout */
 	TEST_STDOUT(STDOUT_FILENO);
@@ -415,8 +430,10 @@ void write_stats_avg(int curr, int read_from_file, unsigned int act_id)
  * @curr		Index in array for current sample statistics.
  * @read_from_file	Set to TRUE if stats are read from a system activity
  * 			data file.
- * @use_tm_start	Set to TRUE if option -s has been used.
- * @use_tm_end		Set to TRUE if option -e has been used.
+ * @use_tm_start	Set to non-zero (USE_HHMMSS_T or USE_EPOCH_T) if
+ *			option -s has been used.
+ * @use_tm_end		Set to non-zero (USE_HHMMSS_T or USE_EPOCH_T) if
+ *			option -e has been used.
  * @reset		Set to TRUE if last_uptime variable should be
  * 			reinitialized (used in next_slice() function).
  * @act_id		Activity that can be displayed or ~0 for all.
@@ -432,10 +449,10 @@ void write_stats_avg(int curr, int read_from_file, unsigned int act_id)
  * 1 if stats have been successfully displayed, and 0 otherwise.
  ***************************************************************************
  */
-int write_stats(int curr, int read_from_file, long *cnt, int use_tm_start,
-		int use_tm_end, int reset, unsigned int act_id, int reset_cd)
+int write_stats(int curr, int read_from_file, long *cnt, enum time_mode use_tm_start,
+		enum time_mode use_tm_end, int reset, unsigned int act_id, int reset_cd)
 {
-	int i, prev_hour;
+	int i, prev_hour, rc = 0;
 	unsigned long long itv;
 	static int cross_day = FALSE;
 
@@ -460,19 +477,15 @@ int write_stats(int curr, int read_from_file, long *cnt, int use_tm_start,
 		return 0;
 
 	/* Get then set previous timestamp */
-	if (sa_get_record_timestamp_struct(flags + S_F_LOCAL_TIME, &record_hdr[!curr],
-					   &rectime))
+	if (sa_get_record_timestamp_struct(flags, &record_hdr[!curr], &rectime))
 		return 0;
-	prev_hour = rectime.tm_hour;
-	set_record_timestamp_string(flags, &record_hdr[!curr],
-				    NULL, timestamp[!curr], TIMESTAMP_LEN, &rectime);
+	prev_hour = rectime.tm_time.tm_hour;
+	set_record_timestamp_string(flags, NULL, timestamp[!curr], TIMESTAMP_LEN, &rectime);
 
 	/* Get then set current timestamp */
-	if (sa_get_record_timestamp_struct(flags + S_F_LOCAL_TIME, &record_hdr[curr],
-					   &rectime))
+	if (sa_get_record_timestamp_struct(flags, &record_hdr[curr], &rectime))
 		return 0;
-	set_record_timestamp_string(flags, &record_hdr[curr],
-				    NULL, timestamp[curr], TIMESTAMP_LEN, &rectime);
+	set_record_timestamp_string(flags, NULL, timestamp[curr], TIMESTAMP_LEN, &rectime);
 
 	/*
 	 * Check if we are beginning a new day.
@@ -480,26 +493,21 @@ int write_stats(int curr, int read_from_file, long *cnt, int use_tm_start,
 	 * to take into account the current timezone (hours displayed will depend on the
 	 * TZ variable value).
 	 */
-	if (use_tm_start && record_hdr[!curr].ust_time &&
+	if ((use_tm_start == USE_HHMMSS_T) && record_hdr[!curr].ust_time &&
 	    (record_hdr[curr].ust_time > record_hdr[!curr].ust_time) &&
-	    (rectime.tm_hour < prev_hour)) {
+	    (rectime.tm_time.tm_hour < prev_hour)) {
 		cross_day = TRUE;
 	}
 
 	/* Check time (2) */
-	if (use_tm_start && (datecmp(&rectime, &tm_start, cross_day) < 0))
-		/* it's too soon... */
-		return 0;
-
-	/* Get interval value in 1/100th of a second */
-	get_itv_value(&record_hdr[curr], &record_hdr[!curr], &itv);
-
-	/* Check time (3) */
-	if (use_tm_end && (datecmp(&rectime, &tm_end, cross_day) > 0)) {
-		/* It's too late... */
+	if ((use_tm_end != NO_TIME) && datecmp(&rectime, &tm_end, cross_day) > 0) {
+		/* End time exceeded */
 		*cnt = 0;
 		return 0;
 	}
+
+	/* Get interval value in 1/100th of a second */
+	get_itv_value(&record_hdr[curr], &record_hdr[!curr], &itv);
 
 	avg_count++;
 
@@ -514,10 +522,11 @@ int write_stats(int curr, int read_from_file, long *cnt, int use_tm_start,
 		if (IS_SELECTED(act[i]->options) && (act[i]->nr[curr] > 0)) {
 			/* Display current activity statistics */
 			(*act[i]->f_print)(act[i], !curr, curr, itv);
+			rc = 1;
 		}
 	}
 
-	return 1;
+	return rc;
 }
 
 /*
@@ -557,7 +566,7 @@ void write_stats_startup(int curr)
 	flags |= S_F_SINCE_BOOT;
 	dish = TRUE;
 
-	write_stats(curr, USE_SADC, &count, NO_TM_START, NO_TM_END, NO_RESET,
+	write_stats(curr, USE_SADC, &count, NO_TIME, NO_TIME, NO_RESET,
 		    ALL_ACTIVITIES, TRUE);
 
 	exit(0);
@@ -608,19 +617,19 @@ size_t sa_read(void *buffer, size_t size)
  * @action	Action expected from current function (unused here).
  * @cur_date	Date string of current restart message (unused here).
  * @cur_time	Time string of current restart message.
- * @utc		True if @cur_time is expressed in UTC (unused here).
+ * @my_tz	Current timezone (unused here).
  * @file_hdr	System activity file standard header.
  * @record_hdr	Current record header (unused here).
  ***************************************************************************
  */
 __printf_funct_t print_sar_restart(int *tab, int action, char *cur_date, char *cur_time,
-				  int utc, struct file_header *file_hdr,
-				  struct record_header *record_hdr)
+				   char *my_tz, struct file_header *file_hdr,
+				   struct record_header *record_hdr)
 {
 	char restart[64];
 
 	printf("\n%-11s", cur_time);
-	sprintf(restart, "  LINUX RESTART\t(%d CPU)\n",
+	sprintf(restart, "  LINUX RESTART\t(%u CPU)\n",
 		file_hdr->sa_cpu_nr > 1 ? file_hdr->sa_cpu_nr - 1 : 1);
 	cprintf_s(IS_RESTART, "%s", restart);
 
@@ -635,14 +644,14 @@ __printf_funct_t print_sar_restart(int *tab, int action, char *cur_date, char *c
  * @action	Action expected from current function (unused here).
  * @cur_date	Date string of current comment (unused here).
  * @cur_time	Time string of current comment.
- * @utc		True if @cur_time is expressed in UTC (unused here).
+ * @my_tz	Current timezone (unused here).
  * @comment	Comment to display.
  * @file_hdr	System activity file standard header (unused here).
  * @record_hdr	Current record header (unused here).
  ***************************************************************************
  */
-__print_funct_t print_sar_comment(int *tab, int action, char *cur_date, char *cur_time, int utc,
-				  char *comment, struct file_header *file_hdr,
+__print_funct_t print_sar_comment(int *tab, int action, char *cur_date, char *cur_time,
+				  char *my_tz, char *comment, struct file_header *file_hdr,
 				  struct record_header *record_hdr)
 {
 	printf("%-11s", cur_time);
@@ -698,9 +707,8 @@ void read_sadc_stat_bunch(int curr)
 				print_read_error(INCONSISTENT_INPUT_DATA);
 			}
 			if (act[p]->nr[curr] > act[p]->nr_allocated) {
-				reallocate_all_buffers(act[p], act[p]->nr[curr]);
+				reallocate_buffers(act[p], act[p]->nr[curr], flags);
 			}
-
 
 			/*
 			 * For persistent activities, we must make sure that no statistics
@@ -782,13 +790,19 @@ void handle_curr_act_stats(int ifd, off_t fpos, int *curr, long *cnt, int *eosaf
 	}
 	reset_cd = 1;
 
+	/* Min/max values should be initialized the first time */
+	if (DISPLAY_MINMAX(flags)) {
+		xinit = TRUE;
+	}
+
 	do {
 		/*
 		 * Display <count> lines of stats.
 		 * Start with reading current sample's record header.
 		 */
 		*eosaf = read_record_hdr(ifd, rec_hdr_tmp, &record_hdr[*curr],
-					 &file_hdr, arch_64, endian_mismatch, UEOF_STOP, b_size, flags);
+					 &file_hdr, arch_64, endian_mismatch, UEOF_STOP, b_size,
+					 flags, &sar_fmt);
 		rtype = record_hdr[*curr].record_type;
 
 		if ((lines >= rows) || !lines) {
@@ -804,14 +818,16 @@ void handle_curr_act_stats(int ifd, off_t fpos, int *curr, long *cnt, int *eosaf
 
 		if (rtype != R_COMMENT) {
 			/* Read the extra fields since it's not a special record */
-			read_file_stat_bunch(act, *curr, ifd, file_hdr.sa_act_nr, file_actlst,
-					     endian_mismatch, arch_64, file, file_magic, UEOF_STOP);
+			if (read_file_stat_bunch(act, *curr, ifd, file_hdr.sa_act_nr, file_actlst,
+						 endian_mismatch, arch_64, file, file_magic, UEOF_STOP, flags))
+				/* Error or unexpected EOF */
+				break;
 		}
 		else {
 			/* Display comment */
-			next = print_special_record(&record_hdr[*curr], flags + S_F_LOCAL_TIME,
+			next = print_special_record(&record_hdr[*curr], flags,
 						    &tm_start, &tm_end, R_COMMENT, ifd,
-						    &rectime, file, 0,
+						    &rectime, file, 0, NULL,
 						    file_magic, &file_hdr, act, &sar_fmt,
 						    endian_mismatch, arch_64);
 			if (next && lines) {
@@ -830,8 +846,11 @@ void handle_curr_act_stats(int ifd, off_t fpos, int *curr, long *cnt, int *eosaf
 		next = write_stats(*curr, USE_SA_FILE, cnt, tm_start.use, tm_end.use,
 				   *reset, act_id, reset_cd);
 		reset_cd = 0;
-		if (next && (*cnt > 0)) {
-			(*cnt)--;
+		if (next) {
+			if (*cnt > 0) {
+				(*cnt)--;
+			}
+			xinit = FALSE;
 		}
 
 		if (next) {
@@ -928,7 +947,7 @@ void read_header_data(void)
 	/* All activities are not necessarily selected, but NR_ACT is a max */
 	if (file_hdr.sa_act_nr > NR_ACT) {
 #ifdef DEBUG
-		fprintf(stderr, "%s: sa_act_nr=%d\n", __FUNCTION__, file_hdr.sa_act_nr);
+		fprintf(stderr, "%s: sa_act_nr=%u\n", __FUNCTION__, file_hdr.sa_act_nr);
 #endif
 		print_read_error(INCONSISTENT_INPUT_DATA);
 	}
@@ -966,7 +985,7 @@ void read_header_data(void)
 				fprintf(stderr, "%s: p=%d\n", __FUNCTION__, p);
 			}
 			else {
-				fprintf(stderr, "%s: %s: size=%d/%d magic=%x/%x nr=%d nr2=%d types=%d,%d,%d/%d,%d,%d\n",
+				fprintf(stderr, "%s: %s: size=%d/%d magic=%x/%x nr=%d nr2=%d types=%u,%u,%u/%u,%u,%u\n",
 					__FUNCTION__, act[p]->name, act[p]->fsize, file_act.size,
 					act[p]->magic, file_act.magic, file_act.nr, file_act.nr2,
 					act[p]->gtypes_nr[0], act[p]->gtypes_nr[1], act[p]->gtypes_nr[2],
@@ -1019,10 +1038,10 @@ void read_stats_from_file(char from_file[])
 			  &file_actlst, id_seq, &endian_mismatch, &arch_64);
 
 	/* Perform required allocations */
-	allocate_structures(act);
+	allocate_structures(act, flags);
 
 	/* Print report header */
-	print_report_hdr(flags, &rectime, &file_hdr);
+	print_report_hdr(flags, &(rectime.tm_time), &file_hdr);
 
 	/* Read system statistics from file */
 	do {
@@ -1032,16 +1051,16 @@ void read_stats_from_file(char from_file[])
 		 */
 		do {
 			if (read_record_hdr(ifd, rec_hdr_tmp, &record_hdr[0], &file_hdr,
-					    arch_64, endian_mismatch, UEOF_STOP, sizeof(rec_hdr_tmp), flags)) {
+					    arch_64, endian_mismatch, UEOF_STOP, sizeof(rec_hdr_tmp), flags, &sar_fmt)) {
 				/* End of sa data file */
 				return;
 			}
 
 			rtype = record_hdr[0].record_type;
 			if ((rtype == R_RESTART) || (rtype == R_COMMENT)) {
-				print_special_record(&record_hdr[0], flags + S_F_LOCAL_TIME,
+				print_special_record(&record_hdr[0], flags,
 						     &tm_start, &tm_end, rtype, ifd,
-						     &rectime, from_file, 0, &file_magic,
+						     &rectime, from_file, 0, NULL, &file_magic,
 						     &file_hdr, act, &sar_fmt, endian_mismatch, arch_64);
 			}
 			else {
@@ -1049,10 +1068,13 @@ void read_stats_from_file(char from_file[])
 				 * OK: Previous record was not a special one.
 				 * So read now the extra fields.
 				 */
-				read_file_stat_bunch(act, 0, ifd, file_hdr.sa_act_nr,
-						     file_actlst, endian_mismatch, arch_64,
-						     from_file, &file_magic, UEOF_STOP);
-				if (sa_get_record_timestamp_struct(flags + S_F_LOCAL_TIME,
+				if (read_file_stat_bunch(act, 0, ifd, file_hdr.sa_act_nr,
+							 file_actlst, endian_mismatch, arch_64,
+							 from_file, &file_magic, UEOF_STOP, flags))
+					/* Possible unexpected EOF */
+					return;
+
+				if (sa_get_record_timestamp_struct(flags,
 								   &record_hdr[0], &rectime))
 					/*
 					 * An error was detected.
@@ -1062,8 +1084,8 @@ void read_stats_from_file(char from_file[])
 			}
 		}
 		while ((rtype == R_RESTART) || (rtype == R_COMMENT) ||
-		       (tm_start.use && (datecmp(&rectime, &tm_start, FALSE) < 0)) ||
-		       (tm_end.use && (datecmp(&rectime, &tm_end, FALSE) >= 0)));
+		       (datecmp(&rectime, &tm_start, FALSE) < 0) ||
+		       (datecmp(&rectime, &tm_end, FALSE) > 0));
 
 		/* Save the first stats collected. Will be used to compute the average */
 		copy_structures(act, id_seq, record_hdr, 2, 0);
@@ -1130,22 +1152,24 @@ void read_stats_from_file(char from_file[])
 			do {
 				/* Read next record header */
 				eosaf = read_record_hdr(ifd, rec_hdr_tmp, &record_hdr[curr],
-							&file_hdr, arch_64, endian_mismatch, UEOF_STOP, sizeof(rec_hdr_tmp), flags);
+							&file_hdr, arch_64, endian_mismatch, UEOF_STOP, sizeof(rec_hdr_tmp), flags, &sar_fmt);
 				rtype = record_hdr[curr].record_type;
 
 				if (eosaf || (rtype == R_RESTART))
 					break;
 
 				if (rtype != R_COMMENT) {
-					read_file_stat_bunch(act, curr, ifd, file_hdr.sa_act_nr,
-							     file_actlst, endian_mismatch, arch_64,
-							     from_file, &file_magic, UEOF_STOP);
+					if (read_file_stat_bunch(act, curr, ifd, file_hdr.sa_act_nr,
+								 file_actlst, endian_mismatch, arch_64,
+								 from_file, &file_magic, UEOF_STOP, flags))
+						/* Possible unexpected EOF */
+						break;
 				}
 				else {
-					/* This was a COMMENT record: print it */
-					print_special_record(&record_hdr[curr], flags + S_F_LOCAL_TIME,
+					/* This was a COMMENT record: Print it */
+					print_special_record(&record_hdr[curr], flags,
 							     &tm_start, &tm_end, R_COMMENT, ifd,
-							     &rectime, from_file, 0,
+							     &rectime, from_file, 0, NULL,
 							     &file_magic, &file_hdr, act, &sar_fmt,
 							     endian_mismatch, arch_64);
 				}
@@ -1155,9 +1179,9 @@ void read_stats_from_file(char from_file[])
 
 		/* The last record we read was a RESTART one: Print it */
 		if (!eosaf && (record_hdr[curr].record_type == R_RESTART)) {
-			print_special_record(&record_hdr[curr], flags + S_F_LOCAL_TIME,
+			print_special_record(&record_hdr[curr], flags,
 					     &tm_start, &tm_end, R_RESTART, ifd,
-					     &rectime, from_file, 0,
+					     &rectime, from_file, 0, NULL,
 					     &file_magic, &file_hdr, act, &sar_fmt,
 					     endian_mismatch, arch_64);
 		}
@@ -1198,10 +1222,13 @@ void read_stats(void)
 	lines = rows = get_win_height();
 
 	/* Perform required allocations */
-	allocate_structures(act);
+	allocate_structures(act, flags);
+
+	/* No need to init min/max values. Already done in allocate_structures() */
+	xinit = FALSE;
 
 	/* Print report header */
-	print_report_hdr(flags, &rectime, &file_hdr);
+	print_report_hdr(flags, &(rectime.tm_time), &file_hdr);
 
 	/* Read system statistics sent by the data collector */
 	read_sadc_stat_bunch(0);
@@ -1242,13 +1269,26 @@ void read_stats(void)
 			}
 			lines++;
 		}
-		write_stats(curr, USE_SADC, &count, NO_TM_START, tm_end.use,
+		write_stats(curr, USE_SADC, &count, NO_TIME, tm_end.use,
 			    NO_RESET, ALL_ACTIVITIES, TRUE);
+
+		if ((tm_end.use != NO_TIME) && (datecmp(&rectime, &tm_end, FALSE) == 0)) {
+			/*
+			 * The last record displayed has reached ending time.
+			 * Set @count to 0 to keep sadc from saving an additional
+			 * record on next loop and stop now.
+			 * This is not perfect anyway: If the last displayed record hasn't
+			 * reached ending time, but the next one exceeds it, it will not be
+			 * displayed but will still have been saved in datafile by sadc since
+			 * the test is made later at display time.
+			 */
+			count = 0;
+		}
 
 		if (record_hdr[curr].record_type == R_LAST_STATS) {
 			/* File rotation is happening: Re-read header data sent by sadc */
 			read_header_data();
-			allocate_structures(act);
+			allocate_structures(act, flags);
 		}
 
 		if (count > 0) {
@@ -1294,7 +1334,7 @@ int main(int argc, char **argv)
 	init_nls();
 #endif
 
-	tm_start.use = tm_end.use = FALSE;
+	tm_start.use = tm_end.use = NO_TIME;
 
 	/* Allocate and init activity bitmaps */
 	allocate_bitmaps(act);
@@ -1312,23 +1352,29 @@ int main(int argc, char **argv)
 		else if (!strncmp(argv[opt], "--dev=", 6)) {
 			/* Parse devices entered on the command line */
 			p = get_activity_position(act, A_DISK, EXIT_IF_NOT_FOUND);
-			parse_sa_devices(argv[opt], act[p], MAX_DEV_LEN, &opt, 6);
+			parse_sa_devices(argv[opt], act[p], MAX_DEV_LEN, &opt, 6, NO_RANGE);
 		}
 
 		else if (!strncmp(argv[opt], "--fs=", 5)) {
 			/* Parse devices entered on the command line */
 			p = get_activity_position(act, A_FS, EXIT_IF_NOT_FOUND);
-			parse_sa_devices(argv[opt], act[p], MAX_FS_LEN, &opt, 5);
+			parse_sa_devices(argv[opt], act[p], MAX_FS_LEN, &opt, 5, NO_RANGE);
 		}
 
 		else if (!strncmp(argv[opt], "--iface=", 8)) {
 			/* Parse devices entered on the command line */
 			p = get_activity_position(act, A_NET_DEV, EXIT_IF_NOT_FOUND);
-			parse_sa_devices(argv[opt], act[p], MAX_IFACE_LEN, &opt, 8);
+			parse_sa_devices(argv[opt], act[p], MAX_IFACE_LEN, &opt, 8, NO_RANGE);
 			q = get_activity_position(act, A_NET_EDEV, EXIT_IF_NOT_FOUND);
 			act[q]->item_list = act[p]->item_list;
 			act[q]->item_list_sz = act[p]->item_list_sz;
 			act[q]->options |= AO_LIST_ON_CMDLINE;
+		}
+
+		else if (!strncmp(argv[opt], "--int=", 6)) {
+			/* Parse interrupts names entered on the command line */
+			p = get_activity_position(act, A_IRQ, EXIT_IF_NOT_FOUND);
+			parse_sa_devices(argv[opt], act[p], MAX_SA_IRQ_LEN, &opt, 6, NR_IRQS);
 		}
 
 		else if (!strcmp(argv[opt], "--help")) {
@@ -1349,19 +1395,17 @@ int main(int argc, char **argv)
 		}
 
 		else if (!strncmp(argv[opt], "--dec=", 6) && (strlen(argv[opt]) == 7)) {
+			/* Check that the argument is a digit */
+			if (!isdigit(argv[opt][6])) {
+				usage(argv[0]);
+			}
+
 			/* Get number of decimal places */
 			dplaces_nr = atoi(argv[opt] + 6);
 			if ((dplaces_nr < 0) || (dplaces_nr > 2)) {
 				usage(argv[0]);
 			}
 			opt++;
-		}
-
-		else if (!strcmp(argv[opt], "-I")) {
-			/* Parse -I option */
-			if (parse_sar_I_opt(argv, &opt, &flags, act)) {
-				usage(argv[0]);
-			}
 		}
 
 		else if (!strcmp(argv[opt], "-D")) {
@@ -1375,6 +1419,16 @@ int main(int argc, char **argv)
 			if (parse_sa_P_opt(argv, &opt, &flags, act)) {
 				usage(argv[0]);
 			}
+		}
+
+		else if (!strcmp(argv[opt], "-V")) {
+			char *sar_env[] = {ENV_COLORS,
+					   ENV_COLORS_SGR,
+					   ENV_REPEAT_HEADER,
+					   ENV_TIME_DEFTM,
+					   ENV_TIME_FMT};
+#define SAR_ENV_NR	5
+			print_version(sar_env, SAR_ENV_NR);
 		}
 
 		else if (!strcmp(argv[opt], "-o")) {
@@ -1413,14 +1467,14 @@ int main(int argc, char **argv)
 
 		else if (!strcmp(argv[opt], "-s")) {
 			/* Get time start */
-			if (parse_timestamp(argv, &opt, &tm_start, DEF_TMSTART)) {
+			if (parse_timestamp(argv, &opt, &tm_start, DEF_TMSTART, flags)) {
 				usage(argv[0]);
 			}
 		}
 
 		else if (!strcmp(argv[opt], "-e")) {
 			/* Get time end */
-			if (parse_timestamp(argv, &opt, &tm_end, DEF_TMEND)) {
+			if (parse_timestamp(argv, &opt, &tm_end, DEF_TMEND, flags)) {
 				usage(argv[0]);
 			}
 		}
@@ -1538,8 +1592,8 @@ int main(int argc, char **argv)
 		set_default_file(from_file, day_offset, -1);
 	}
 
-	if (tm_start.use && tm_end.use && (tm_end.tm_hour < tm_start.tm_hour)) {
-		tm_end.tm_hour += 24;
+	if (check_time_limits(&tm_start, &tm_end)) {
+		usage(argv[0]);
 	}
 
 	/*
@@ -1551,11 +1605,11 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 	if (USE_OPTION_A(flags)) {
-		/* Set -P ALL -I ALL if needed */
+		/* Set -P ALL if needed */
 		set_bitmaps(act, &flags);
 	}
 	/* Use time start or option -i only when reading stats from a file */
-	if ((tm_start.use || INTERVAL_SET(flags)) && !from_file[0]) {
+	if (((tm_start.use != NO_TIME) || INTERVAL_SET(flags)) && !from_file[0]) {
 		fprintf(stderr,
 			_("Not reading from a system activity file (use -f option)\n"));
 		exit(1);

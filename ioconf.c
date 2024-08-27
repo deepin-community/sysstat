@@ -107,6 +107,7 @@ static char *ioc_conv(int radix, int nozero, const char *syms,
 	}
 
 	while (val > 0) {
+
 		*--p = syms[j = val % radix];
 		val /= radix;
 		if (nozero && (j == 0)) {
@@ -119,7 +120,7 @@ static char *ioc_conv(int radix, int nozero, const char *syms,
 
 char *ioc_ito10(unsigned int n)
 {
-	return (ioc_conv(10, 0, "0123456789", n));
+	return (ioc_conv(10, 0, DIGITS, n));
 }
 
 char *ioc_ito26(unsigned int n)
@@ -177,7 +178,7 @@ int ioc_init(void)
 		memset(blkp, 0, BLK_CONFIG_SIZE);
 		memset(iocp, 0, IOC_ENTRY_SIZE);
 
-		i = sscanf(buf, "%u:%u:%u:%s",
+		i = sscanf(buf, "%u:%u:%u:%63s",
 			   &major, &indirect, &iocp->ctrlno, desc);
 
 		if (i != 4) {
@@ -234,7 +235,7 @@ int ioc_init(void)
 
 		/* maybe it's a full record? */
 
-		i = sscanf(buf, "%u:%[^:]:%[^:]:%u:%[^:]:%u:%[^:]:%u:%s",
+		i = sscanf(buf, "%u:%[^:]:%[^:]:%u:%[^:]:%u:%[^:]:%u:%63s",
 			   &major, blkp->name,
 			   cfmt, &iocp->ctrlno,
 			   dfmt, &blkp->dcount,
